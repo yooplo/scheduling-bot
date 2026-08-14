@@ -1,0 +1,246 @@
+# Spec: Telegram → Google Calendar Bot
+
+## 1. Overview
+
+A personal Telegram bot that lets the user create, list, and delete Google
+Calendar events by sending natural-language messages (e.g. "dentist
+checkup tomorrow 2-3pm"). The bot parses the message using the Anthropic
+API (Claude) into structured event data, then calls the Google Calendar
+API to perform the action.
+
+Single-user tool. No multi-tenant auth, no database beyond a small local
+state file if needed. Runs as a webhook-based web service on a free host
+(Render/Railway/Fly.io).
+
+## 2. Goals / Non-Goals
+
+**Goals**
+- Add events via free-text message
+- List upcoming events
+- Delete/cancel events via free-text reference (fuzzy match against
+  upcoming events)
+- Confirm every action back to the user in chat
+- Run reliably on a free-tier host with a webhook (no polling)
+
+**Non-goals (v1)**
+- Multi-user support
+- Recurring event creation
+- Editing an existing event's fields (only add/delete in v1 — editing can
+  be a v2 addition)
+- Voice message input
+
+## 3. Architecture
+
+```
+Telegram (user) → Telegram webhook → Web app (FastAPI) → Router
+                                                              ├─ Add flow    → Claude API (parse) → Google Calendar API (insert)
+                                                              ├─ List flow   → Google Calendar API (list)
+                                                              └─ Delete flow → Google Calendar API (list) → Claude/fuzzy match → Google Calendar API (delete)
+                                                              ↓
+                                                        Reply to Telegram
+```
+
+- **Transport**: Telegram Bot API, webhook mode (not long polling)
+- **Web framework**: FastAPI (async, plays well with webhook handlers)
+- **NLP parsing**: Anthropic API (Claude), prompted to return structured JSON
+- **Calendar**: Google Calendar API v3, OAuth 2.0 (installed-app flow, one-time),
+  refresh token stored as a secret/env var
+- **Hosting**: Render or Railway free web service, single process
+
+## 4. File / Project Structure
+
+```
+calendar-bot/
+├── app/
+│   ├── main.py              # FastAPI app, /webhook route, dispatch logic
+│   ├── telegram_client.py   # Send messages, verify webhook secret
+│   ├── parser.py            # Claude API calls: parse_event(), match_event()
+│   ├── calendar_client.py   # Google Calendar wrapper: create/list/delete
+│   ├── config.py            # Loads env vars, validates required secrets
+│   └── models.py            # Pydantic models for ParsedEvent, EventMatch, etc.
+├── auth/
+│   └── get_refresh_token.py # One-time local script for Google OAuth
+├── tests/
+│   ├── test_parser.py
+│   └── test_calendar_client.py
+├── requirements.txt
+├── .env.example
+├── render.yaml               # or Procfile, depending on host
+└── README.md
+```
+
+## 5. External Services & Credentials
+
+| Service | Purpose | Credential |
+|---|---|---|
+| Telegram Bot API | Receive/send messages | `TELEGRAM_BOT_TOKEN` |
+| Telegram webhook | Verify incoming requests are genuine | `TELEGRAM_WEBHOOK_SECRET` |
+| Anthropic API | Parse natural language into structured event data | `ANTHROPIC_API_KEY` |
+| Google Calendar API | Create/list/delete events | `GOOGLE_CLIENT_ID`, `GOOGLE_CLIENT_SECRET`, `GOOGLE_REFRESH_TOKEN` |
+
+All secrets are stored as environment variables on the host. `.env.example`
+documents every required variable with a placeholder value and a comment.
+
+## 6. Data Contracts
+
+### 6.1 ParsedEvent (Claude → app)
+
+Claude is prompted to return **only** this JSON shape, no prose:
+
+```json
+{
+  "action": "add",
+  "title": "string",
+  "start": "ISO 8601 datetime with timezone",
+  "end": "ISO 8601 datetime with timezone",
+  "location": "string or null",
+  "confidence": "high | low"
+}
+```
+
+- `confidence: low` triggers a clarifying reply instead of creating the
+  event outright (e.g. ambiguous date, missing time).
+- If `end` cannot be inferred, default to `start + 1 hour`.
+- Prompt must include the current datetime and the user's timezone so
+  relative phrases ("tomorrow", "next Tuesday") resolve correctly.
+
+### 6.2 DeleteMatch (Claude/fuzzy match → app)
+
+For delete requests, the app first fetches upcoming events (e.g. next 30
+days) from Google Calendar, then asks Claude to pick the best match:
+
+```json
+{
+  "action": "delete",
+  "matched_event_id": "string or null",
+  "matched_title": "string or null",
+  "ambiguous": true,
+  "candidates": [
+    {"event_id": "string", "title": "string", "start": "ISO 8601"}
+  ]
+}
+```
+
+- If `ambiguous: true` or no confident match, the bot replies with a
+  numbered list of candidates and waits for the user to pick one
+  (simple in-memory pending-action state keyed by chat ID, with a
+  short TTL).
+
+### 6.3 Telegram outgoing messages
+
+All replies are plain text, no Markdown parsing issues — escape any
+special characters if using Telegram's MarkdownV2 mode, or default to
+plain text mode to avoid formatting bugs.
+
+## 7. Command / Message Handling
+
+No slash commands required for v1 — every message is treated as natural
+language and routed by intent:
+
+| User intent (examples) | Detected action |
+|---|---|
+| "dentist checkup tomorrow 2-3pm" | add |
+| "cancel my dentist appointment" / "delete the 2pm meeting" | delete |
+| "what's on my calendar this week" / "list upcoming" | list |
+| Reply to a pending disambiguation ("2" or "the second one") | resolve pending delete |
+
+Intent detection can be a single Claude call that returns `action` as
+part of the JSON, or a lightweight keyword pre-check (e.g. "cancel",
+"delete", "remove" → delete; "what's on", "list", "show" → list;
+everything else → add) with Claude only used for the add/delete field
+extraction. **Recommendation: keyword pre-check for action routing,
+Claude only for field extraction** — cheaper and more predictable.
+
+## 8. Core Flows
+
+### 8.1 Add event
+1. Receive message → keyword check doesn't match delete/list → treat as add
+2. Call `parser.parse_event(message, now, timezone)`
+3. If `confidence: low` → reply asking for clarification, stop
+4. Call `calendar_client.create_event(parsed_event)`
+5. Reply: `✅ Added: {title} — {formatted start}–{formatted end}`
+
+### 8.2 List upcoming
+1. Detect "list" intent
+2. Call `calendar_client.list_events(days_ahead=7)` (default window;
+   allow "this month" etc. to adjust window later)
+3. Reply with a formatted list, one line per event
+
+### 8.3 Delete event
+1. Detect "delete" intent
+2. Call `calendar_client.list_events(days_ahead=30)`
+3. Call `parser.match_event(message, candidate_events)`
+4. If single confident match → delete immediately, confirm
+5. If ambiguous → reply with numbered candidates, store pending state
+   `{chat_id: [event_ids]}` with a 5-minute TTL
+6. On next message, if pending state exists and message looks like a
+   selection (digit or ordinal), resolve and delete; otherwise clear
+   pending state and treat as a new message
+
+## 9. Error Handling
+
+- Google API errors (expired token, quota, network) → catch, log, reply
+  with a generic "couldn't reach your calendar, try again" message —
+  never expose raw stack traces to the user
+- Claude API errors/timeouts → same pattern, generic retry message
+- Malformed/unparseable JSON from Claude → retry once with a stricter
+  prompt; if it fails again, ask the user to rephrase
+- Telegram webhook requests without the correct secret token → reject
+  with 401, do not process
+- All exceptions logged server-side with enough context to debug
+  (message text, action detected, timestamp) — no need for a full
+  logging stack, stdout logs on the host are sufficient for v1
+
+## 10. Timezone Handling
+
+- User's home timezone is a fixed config value (`USER_TIMEZONE` env var,
+  e.g. `Asia/Singapore`) since this is single-user
+- All relative date/time phrases are resolved against this timezone
+- All events are created in Google Calendar with this timezone explicitly
+  set (not UTC-naive)
+
+## 11. Security Notes
+
+- Telegram webhook secret token validated on every request
+- Bot only responds to messages from the owner's Telegram user ID
+  (`ALLOWED_TELEGRAM_USER_ID` env var) — reject/ignore all others
+  silently or with a polite "not authorized" message
+- No secrets committed to source control; `.env` gitignored
+- Google refresh token has calendar scope only
+  (`https://www.googleapis.com/auth/calendar`), not broader Google
+  account access
+
+## 12. Build Milestones
+
+1. **Skeleton**: FastAPI app + Telegram webhook wired up, echoes
+   messages back. Confirms hosting + webhook delivery work.
+2. **Google auth**: One-time OAuth script produces a refresh token;
+   hardcoded test event created successfully via `calendar_client.py`.
+3. **Add flow**: Claude parsing integrated, real events created from
+   free-text messages.
+4. **List flow**: upcoming events fetched and formatted in chat.
+5. **Delete flow**: fuzzy match + disambiguation + deletion.
+6. **Hardening**: error handling, timezone edge cases, unauthorized user
+   rejection, logging.
+
+## 13. Acceptance Criteria (v1 done when)
+
+- [ ] Sending a natural-language add message creates a correctly-timed
+      event on the real Google Calendar
+- [ ] Sending "list" / "what's on my calendar" returns accurate upcoming
+      events
+- [ ] Sending a delete phrase removes the correct event, with
+      disambiguation when multiple events could match
+- [ ] Bot ignores/rejects messages from any Telegram user other than the
+      owner
+- [ ] Bot recovers gracefully (no crash, clear message) from a Google or
+      Claude API failure
+- [ ] App runs continuously on the chosen free host with the webhook
+      correctly registered
+
+## 14. Open Questions (resolve before/during build)
+
+- Exact Claude model string and current pricing to confirm before
+  implementation (verify at build time, not assumed from this spec)
+- Default list window (7 days vs. configurable) — start with 7, revisit
+- Whether "edit existing event" is worth adding in v1 or deferred to v2
