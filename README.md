@@ -58,7 +58,7 @@ Before `git add`, run `git status` and make sure `.env` and `client_secret.json`
 
 1. Create an account at [Render](https://render.com/) and connect GitHub.
 2. Click **New → Blueprint**, select this repository, and approve `render.yaml`.
-3. Enter the required values marked `sync: false`: `TELEGRAM_BOT_TOKEN`, `ALLOWED_TELEGRAM_USER_ID`, `ANTHROPIC_API_KEY`, `GOOGLE_CLIENT_ID`, `GOOGLE_CLIENT_SECRET`, and `GOOGLE_REFRESH_TOKEN`. Render generates `TELEGRAM_WEBHOOK_SECRET`; retrieve its value from the service Environment page for the next step.
+3. Generate a webhook secret locally with `python -c "import secrets; print(secrets.token_urlsafe(32))"`. Enter it, along with the other values marked `sync: false`: `TELEGRAM_BOT_TOKEN`, `ALLOWED_TELEGRAM_USER_ID`, `ANTHROPIC_API_KEY`, `GOOGLE_CLIENT_ID`, `GOOGLE_CLIENT_SECRET`, and `GOOGLE_REFRESH_TOKEN`. Keep the webhook secret available for the next step.
 4. Deploy. Once healthy, copy its URL, for example `https://telegram-calendar-bot.onrender.com`.
 5. Register the webhook from PowerShell. Replace all placeholders; do not paste the command into a shell history if it contains your token:
 

@@ -13,7 +13,7 @@ services:
       - key: TELEGRAM_BOT_TOKEN
         sync: false
       - key: TELEGRAM_WEBHOOK_SECRET
-        generateValue: true
+        sync: false
       - key: ALLOWED_TELEGRAM_USER_ID
         sync: false
       - key: ANTHROPIC_API_KEY
@@ -30,4 +30,3 @@ services:
         value: primary
       - key: USER_TIMEZONE
         value: Asia/Singapore
-
