@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 from datetime import datetime, timedelta, timezone
+from zoneinfo import ZoneInfo
 
 from google.auth.transport.requests import Request
 from google.oauth2.credentials import Credentials
@@ -36,7 +37,7 @@ class CalendarClient:
         if event.location:
             body["location"] = event.location
         item = self._service.events().insert(calendarId=self._calendar_id, body=body).execute()
-        return _to_event(item)
+        return _to_event(item, self._timezone)
 
     def list_events(self, days_ahead: int = 7) -> list[CalendarEvent]:
         now = datetime.now(timezone.utc)
@@ -47,19 +48,28 @@ class CalendarClient:
             singleEvents=True,
             orderBy="startTime",
         ).execute()
-        return [_to_event(item) for item in result.get("items", []) if item.get("status") != "cancelled"]
+        events = [_to_event(item, self._timezone) for item in result.get("items", []) if item.get("status") != "cancelled"]
+        # Google may include events that began before timeMin but overlap it. Do
+        # not show an event once its end time has passed.
+        return [event for event in events if event.end is None or event.end > now]
 
     def delete_event(self, event_id: str) -> None:
         self._service.events().delete(calendarId=self._calendar_id, eventId=event_id).execute()
 
 
-def _to_event(item: dict) -> CalendarEvent:
+def _to_event(item: dict, timezone_name: str = "UTC") -> CalendarEvent:
     start = item.get("start", {}).get("dateTime") or item.get("start", {}).get("date")
     end = item.get("end", {}).get("dateTime") or item.get("end", {}).get("date")
+    calendar_timezone = ZoneInfo(timezone_name)
+    def parse(value: str | None) -> datetime | None:
+        if not value:
+            return None
+        parsed = datetime.fromisoformat(value.replace("Z", "+00:00"))
+        return parsed if parsed.tzinfo else parsed.replace(tzinfo=calendar_timezone)
+
     return CalendarEvent(
         event_id=item["id"], title=item.get("summary") or "(untitled)",
-        start=datetime.fromisoformat(start.replace("Z", "+00:00")),
-        end=datetime.fromisoformat(end.replace("Z", "+00:00")) if end else None,
+        start=parse(start),
+        end=parse(end),
         location=item.get("location"),
     )
-
