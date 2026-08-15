@@ -1,0 +1,22 @@
+from datetime import datetime
+
+from app.main import _format_event_range
+from app.models import CalendarEvent
+
+
+def test_event_range_shows_one_date_for_same_day_event():
+    event = CalendarEvent(
+        event_id="1", title="IPPT",
+        start=datetime.fromisoformat("2026-08-15T17:00:00+08:00"),
+        end=datetime.fromisoformat("2026-08-15T18:30:00+08:00"),
+    )
+    assert _format_event_range(event) == "Sat 15 Aug · 5:00 PM–6:30 PM"
+
+
+def test_event_range_shows_both_dates_when_crossing_midnight():
+    event = CalendarEvent(
+        event_id="1", title="Flight",
+        start=datetime.fromisoformat("2026-08-15T23:00:00+08:00"),
+        end=datetime.fromisoformat("2026-08-16T01:00:00+08:00"),
+    )
+    assert _format_event_range(event) == "Sat 15 Aug 11:00 PM → Sun 16 Aug 1:00 AM"

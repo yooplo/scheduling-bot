@@ -120,8 +120,8 @@ async def handle_message(chat_id: int, text: str, settings: Settings, telegram: 
         if not events:
             await telegram.send_message(chat_id, "No events in the next 7 days.")
         else:
-            lines = [f"• {event.title} — {_format_time(event.start)}" for event in events]
-            await telegram.send_message(chat_id, "Upcoming events:\n" + "\n".join(lines))
+            lines = [f"{index}. {event.title}\n   {_format_event_range(event)}" for index, event in enumerate(events, 1)]
+            await telegram.send_message(chat_id, "Upcoming events:\n\n" + "\n\n".join(lines))
     else:
         now = datetime.now(settings.timezone)
         event = await asyncio.to_thread(parser.parse_event, text, now, settings.user_timezone)
@@ -171,3 +171,23 @@ def _format_time(value: datetime | None) -> str:
         return "time unavailable"
     hour = value.hour % 12 or 12
     return f"{value:%a} {value.day} {value:%b} {hour}:{value:%M} {value:%p}"
+
+
+def _format_event_range(event: CalendarEvent) -> str:
+    """Format one event with a compact but unambiguous date/time range."""
+    start = event.start
+    end = event.end
+    if not end:
+        return _format_time(start)
+    start_date = f"{start:%a} {start.day} {start:%b}"
+    start_time = _format_clock(start)
+    end_time = _format_clock(end)
+    if start.date() == end.date():
+        return f"{start_date} · {start_time}–{end_time}"
+    end_date = f"{end:%a} {end.day} {end:%b}"
+    return f"{start_date} {start_time} → {end_date} {end_time}"
+
+
+def _format_clock(value: datetime) -> str:
+    hour = value.hour % 12 or 12
+    return f"{hour}:{value:%M} {value:%p}"
