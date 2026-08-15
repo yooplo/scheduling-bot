@@ -22,8 +22,8 @@ class GroqParser:
         prompt = f"""Extract one calendar event from the user's message. Return JSON only.
 Current datetime: {now.isoformat()}. User timezone: {timezone_name}.
 Resolve relative dates against that datetime. All datetime values must include an offset.
-If no end is given, set it to one hour after start. Use low confidence for unclear date or time.
-Schema: {{\"action\":\"add\",\"title\":string,\"start\":ISO8601,\"end\":ISO8601,\"location\":string|null,\"confidence\":\"high\"|\"low\"}}
+If no end is given, set it to one hour after start. Extract reminder_minutes if the user says "remind me X minutes/hours before"; otherwise use null. Use low confidence for unclear date or time.
+Schema: {{\"action\":\"add\",\"title\":string,\"start\":ISO8601,\"end\":ISO8601,\"location\":string|null,\"confidence\":\"high\"|\"low\",\"reminder_minutes\":integer|null}}
 User message: {message}"""
         return self._request_model(prompt, ParsedEvent)
 

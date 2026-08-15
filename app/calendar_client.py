@@ -36,6 +36,8 @@ class CalendarClient:
         }
         if event.location:
             body["location"] = event.location
+        if event.reminder_minutes:
+            body["extendedProperties"] = {"private": {"telegram_reminder_minutes": str(event.reminder_minutes)}}
         item = self._service.events().insert(calendarId=self._calendar_id, body=body).execute()
         return _to_event(item, self._timezone)
 
@@ -55,6 +57,22 @@ class CalendarClient:
 
     def delete_event(self, event_id: str) -> None:
         self._service.events().delete(calendarId=self._calendar_id, eventId=event_id).execute()
+
+    def due_reminders(self) -> list[CalendarEvent]:
+        now = datetime.now(timezone.utc)
+        result = self._service.events().list(calendarId=self._calendar_id, timeMin=now.isoformat(), timeMax=(now + timedelta(days=8)).isoformat(), singleEvents=True, orderBy="startTime", privateExtendedProperty="telegram_reminder_minutes").execute()
+        due = []
+        for item in result.get("items", []):
+            event = _to_event(item, self._timezone)
+            if event.reminder_minutes and not event.reminder_sent and event.start - timedelta(minutes=event.reminder_minutes) <= now < event.start:
+                due.append(event)
+        return due
+
+    def mark_reminder_sent(self, event_id: str) -> None:
+        item = self._service.events().get(calendarId=self._calendar_id, eventId=event_id).execute()
+        private = item.get("extendedProperties", {}).get("private", {})
+        private["telegram_reminder_sent"] = "true"
+        self._service.events().patch(calendarId=self._calendar_id, eventId=event_id, body={"extendedProperties": {"private": private}}).execute()
 
     def update_event(self, event_id: str, event: ParsedEdit) -> CalendarEvent:
         body = {
@@ -79,9 +97,13 @@ def _to_event(item: dict, timezone_name: str = "UTC") -> CalendarEvent:
         parsed = datetime.fromisoformat(value.replace("Z", "+00:00"))
         return parsed if parsed.tzinfo else parsed.replace(tzinfo=calendar_timezone)
 
+    properties = item.get("extendedProperties", {}).get("private", {})
+    reminder = properties.get("telegram_reminder_minutes")
     return CalendarEvent(
         event_id=item["id"], title=item.get("summary") or "(untitled)",
         start=parse(start),
         end=parse(end),
         location=item.get("location"),
+        reminder_minutes=int(reminder) if reminder and reminder.isdigit() else None,
+        reminder_sent=properties.get("telegram_reminder_sent") == "true",
     )

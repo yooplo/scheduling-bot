@@ -76,6 +76,15 @@ Render currently offers free Python web services, but they sleep after 15 minute
 pytest
 ```
 
+## Free scheduled reminders and daily agenda
+
+Create an account at [cron-job.org](https://cron-job.org/). Generate `SCHEDULER_SECRET` with `python -c "import secrets; print(secrets.token_urlsafe(32))"`, add it to Render, and redeploy. Create these HTTPS POST jobs with header `Authorization: Bearer <SCHEDULER_SECRET>`:
+
+- Every minute: `https://YOUR-SERVICE.onrender.com/scheduled/reminders`
+- Daily at 08:00, timezone `Asia/Singapore`: `https://YOUR-SERVICE.onrender.com/scheduled/daily-agenda`
+
+Add reminders in natural language, for example: `Dentist tomorrow at 2pm, remind me 30 minutes before`.
+
 ## Security notes
 
 - The webhook validates Telegram's secret header before processing anything.

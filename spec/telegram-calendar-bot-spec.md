@@ -30,6 +30,24 @@ state file if needed. Runs as a webhook-based web service on a free host
 ## 3. Architecture
 
 ```
+
+## 3.1 Technology Stack
+
+| Layer | Technology | Purpose |
+|---|---|---|
+| Bot transport | Telegram Bot API webhooks | Receive messages and send replies |
+| Web service | Python 3.12, FastAPI, Uvicorn | HTTPS webhook and scheduler endpoints |
+| Natural-language parsing | Groq API (`openai/gpt-oss-20b`) | Extract event, edit, delete, and reminder data |
+| Calendar | Google Calendar API v3, OAuth 2.0 | Event CRUD, reminder metadata, and availability data |
+| Hosting | Render free web service | Public HTTPS runtime and GitHub deployment |
+| External scheduler | cron-job.org | Minute-by-minute reminders and daily agenda delivery |
+| Testing | pytest | Parser, Calendar conversion, and formatting tests |
+
+## 3.2 Scheduled Notifications
+
+- `POST /scheduled/reminders` is called every minute by cron-job.org. It validates `SCHEDULER_SECRET`, finds due reminders, sends Telegram messages, and marks each reminder as sent in the event's private Google Calendar metadata.
+- `POST /scheduled/daily-agenda` is called once daily at the configured `DAILY_AGENDA_HOUR` in `USER_TIMEZONE` and sends the day's agenda to the owner.
+- Scheduler requests use an `Authorization: Bearer <SCHEDULER_SECRET>` header; direct unauthorised calls are rejected.
 Telegram (user) → Telegram webhook → Web app (FastAPI) → Router
                                                               ├─ Add flow    → LLM (parse) → Google Calendar API (insert)
                                                               ├─ List flow   → Google Calendar API (list)

@@ -29,6 +29,8 @@ class Settings:
     google_refresh_token: str
     google_calendar_id: str
     user_timezone: str
+    scheduler_secret: str
+    daily_agenda_hour: int
 
     @property
     def timezone(self) -> ZoneInfo:
@@ -43,6 +45,12 @@ def get_settings() -> Settings:
         allowed_user_id = int(_required("ALLOWED_TELEGRAM_USER_ID"))
     except ValueError as exc:
         raise ConfigurationError("ALLOWED_TELEGRAM_USER_ID must be numeric") from exc
+    try:
+        daily_agenda_hour = int(os.getenv("DAILY_AGENDA_HOUR", "8"))
+    except ValueError as exc:
+        raise ConfigurationError("DAILY_AGENDA_HOUR must be 0-23") from exc
+    if not 0 <= daily_agenda_hour <= 23:
+        raise ConfigurationError("DAILY_AGENDA_HOUR must be 0-23")
     return Settings(
         telegram_bot_token=_required("TELEGRAM_BOT_TOKEN"),
         telegram_webhook_secret=_required("TELEGRAM_WEBHOOK_SECRET"),
@@ -54,4 +62,6 @@ def get_settings() -> Settings:
         google_refresh_token=_required("GOOGLE_REFRESH_TOKEN"),
         google_calendar_id=os.getenv("GOOGLE_CALENDAR_ID", "primary"),
         user_timezone=os.getenv("USER_TIMEZONE", "Asia/Singapore"),
+        scheduler_secret=_required("SCHEDULER_SECRET"),
+        daily_agenda_hour=daily_agenda_hour,
     )

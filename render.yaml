@@ -30,3 +30,7 @@ services:
         value: primary
       - key: USER_TIMEZONE
         value: Asia/Singapore
+      - key: SCHEDULER_SECRET
+        sync: false
+      - key: DAILY_AGENDA_HOUR
+        value: "8"

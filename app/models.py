@@ -13,6 +13,7 @@ class ParsedEvent(BaseModel):
     end: datetime
     location: str | None = Field(default=None, max_length=500)
     confidence: Literal["high", "low"]
+    reminder_minutes: int | None = Field(default=None, ge=1, le=10080)
 
 
 class ParsedEdit(BaseModel):
@@ -45,3 +46,5 @@ class CalendarEvent(BaseModel):
     start: datetime
     end: datetime | None = None
     location: str | None = None
+    reminder_minutes: int | None = None
+    reminder_sent: bool = False
