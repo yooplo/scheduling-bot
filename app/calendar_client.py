@@ -8,7 +8,7 @@ from google.oauth2.credentials import Credentials
 from googleapiclient.discovery import build
 
 from .config import Settings
-from .models import CalendarEvent, ParsedEvent
+from .models import CalendarEvent, ParsedEdit, ParsedEvent
 
 CALENDAR_SCOPE = "https://www.googleapis.com/auth/calendar"
 
@@ -55,6 +55,18 @@ class CalendarClient:
 
     def delete_event(self, event_id: str) -> None:
         self._service.events().delete(calendarId=self._calendar_id, eventId=event_id).execute()
+
+    def update_event(self, event_id: str, event: ParsedEdit) -> CalendarEvent:
+        body = {
+            "summary": event.title,
+            "start": {"dateTime": event.start.isoformat(), "timeZone": self._timezone},
+            "end": {"dateTime": event.end.isoformat(), "timeZone": self._timezone},
+            "location": event.location or "",
+        }
+        item = self._service.events().patch(
+            calendarId=self._calendar_id, eventId=event_id, body=body
+        ).execute()
+        return _to_event(item, self._timezone)
 
 
 def _to_event(item: dict, timezone_name: str = "UTC") -> CalendarEvent:

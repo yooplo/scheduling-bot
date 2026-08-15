@@ -4,8 +4,8 @@
 
 A personal Telegram bot that lets the user create, list, and delete Google
 Calendar events by sending natural-language messages (e.g. "dentist
-checkup tomorrow 2-3pm"). The bot parses the message using the Anthropic
-API (Claude) into structured event data, then calls the Google Calendar
+checkup tomorrow 2-3pm"). The bot parses the message using the Groq
+API into structured event data, then calls the Google Calendar
 API to perform the action.
 
 Single-user tool. No multi-tenant auth, no database beyond a small local
@@ -17,7 +17,7 @@ state file if needed. Runs as a webhook-based web service on a free host
 **Goals**
 - Add events via free-text message
 - List upcoming events
-- Delete/cancel events via free-text reference (fuzzy match against
+- Delete/cancel or edit events via free-text reference (fuzzy match against
   upcoming events)
 - Confirm every action back to the user in chat
 - Run reliably on a free-tier host with a webhook (no polling)
@@ -25,24 +25,23 @@ state file if needed. Runs as a webhook-based web service on a free host
 **Non-goals (v1)**
 - Multi-user support
 - Recurring event creation
-- Editing an existing event's fields (only add/delete in v1 — editing can
-  be a v2 addition)
 - Voice message input
 
 ## 3. Architecture
 
 ```
 Telegram (user) → Telegram webhook → Web app (FastAPI) → Router
-                                                              ├─ Add flow    → Claude API (parse) → Google Calendar API (insert)
+                                                              ├─ Add flow    → LLM (parse) → Google Calendar API (insert)
                                                               ├─ List flow   → Google Calendar API (list)
-                                                              └─ Delete flow → Google Calendar API (list) → Claude/fuzzy match → Google Calendar API (delete)
+                                                              ├─ Delete flow → Google Calendar API (list) → LLM/fuzzy match → Google Calendar API (delete)
+                                                              └─ Edit flow   → Google Calendar API (list) → LLM (parse change) → Google Calendar API (patch)
                                                               ↓
                                                         Reply to Telegram
 ```
 
 - **Transport**: Telegram Bot API, webhook mode (not long polling)
 - **Web framework**: FastAPI (async, plays well with webhook handlers)
-- **NLP parsing**: Anthropic API (Claude), prompted to return structured JSON
+- **NLP parsing**: Groq API, prompted to return structured JSON
 - **Calendar**: Google Calendar API v3, OAuth 2.0 (installed-app flow, one-time),
   refresh token stored as a secret/env var
 - **Hosting**: Render or Railway free web service, single process
@@ -54,7 +53,7 @@ calendar-bot/
 ├── app/
 │   ├── main.py              # FastAPI app, /webhook route, dispatch logic
 │   ├── telegram_client.py   # Send messages, verify webhook secret
-│   ├── parser.py            # Claude API calls: parse_event(), match_event()
+│   ├── parser.py            # Groq API calls: parse_event(), match_event(), parse_edit()
 │   ├── calendar_client.py   # Google Calendar wrapper: create/list/delete
 │   ├── config.py            # Loads env vars, validates required secrets
 │   └── models.py            # Pydantic models for ParsedEvent, EventMatch, etc.
@@ -75,7 +74,7 @@ calendar-bot/
 |---|---|---|
 | Telegram Bot API | Receive/send messages | `TELEGRAM_BOT_TOKEN` |
 | Telegram webhook | Verify incoming requests are genuine | `TELEGRAM_WEBHOOK_SECRET` |
-| Anthropic API | Parse natural language into structured event data | `ANTHROPIC_API_KEY` |
+| Groq API | Parse natural language into structured event data | `GROQ_API_KEY` |
 | Google Calendar API | Create/list/delete events | `GOOGLE_CLIENT_ID`, `GOOGLE_CLIENT_SECRET`, `GOOGLE_REFRESH_TOKEN` |
 
 All secrets are stored as environment variables on the host. `.env.example`
@@ -83,9 +82,9 @@ documents every required variable with a placeholder value and a comment.
 
 ## 6. Data Contracts
 
-### 6.1 ParsedEvent (Claude → app)
+### 6.1 ParsedEvent (Groq → app)
 
-Claude is prompted to return **only** this JSON shape, no prose:
+Groq is prompted to return **only** this JSON shape, no prose:
 
 ```json
 {
@@ -104,10 +103,10 @@ Claude is prompted to return **only** this JSON shape, no prose:
 - Prompt must include the current datetime and the user's timezone so
   relative phrases ("tomorrow", "next Tuesday") resolve correctly.
 
-### 6.2 DeleteMatch (Claude/fuzzy match → app)
+### 6.2 DeleteMatch (Groq/fuzzy match → app)
 
 For delete requests, the app first fetches upcoming events (e.g. next 30
-days) from Google Calendar, then asks Claude to pick the best match:
+days) from Google Calendar, then asks Groq to pick the best match:
 
 ```json
 {
@@ -141,15 +140,16 @@ language and routed by intent:
 |---|---|
 | "dentist checkup tomorrow 2-3pm" | add |
 | "cancel my dentist appointment" / "delete the 2pm meeting" | delete |
+| "move IPPT to 4pm" / "change dentist to Friday" | edit |
 | "what's on my calendar this week" / "list upcoming" | list |
 | Reply to a pending disambiguation ("2" or "the second one") | resolve pending delete |
 
-Intent detection can be a single Claude call that returns `action` as
+Intent detection can be a single Groq call that returns `action` as
 part of the JSON, or a lightweight keyword pre-check (e.g. "cancel",
 "delete", "remove" → delete; "what's on", "list", "show" → list;
-everything else → add) with Claude only used for the add/delete field
+everything else → add) with Groq only used for add/delete/edit field
 extraction. **Recommendation: keyword pre-check for action routing,
-Claude only for field extraction** — cheaper and more predictable.
+Groq only for field extraction** — cheaper and more predictable.
 
 ## 8. Core Flows
 
@@ -177,13 +177,20 @@ Claude only for field extraction** — cheaper and more predictable.
    selection (digit or ordinal), resolve and delete; otherwise clear
    pending state and treat as a new message
 
+### 8.4 Edit event
+1. Detect an edit keyword such as "change", "move", "reschedule", or "update"
+2. Fetch upcoming events for the next 30 days and match the referenced event
+3. If ambiguous, present numbered candidates and retain the original edit request for five minutes
+4. Parse the requested change against the selected event, preserving fields the user did not change
+5. If confident, patch the Google Calendar event and confirm the updated time
+
 ## 9. Error Handling
 
 - Google API errors (expired token, quota, network) → catch, log, reply
   with a generic "couldn't reach your calendar, try again" message —
   never expose raw stack traces to the user
-- Claude API errors/timeouts → same pattern, generic retry message
-- Malformed/unparseable JSON from Claude → retry once with a stricter
+- Groq API errors/timeouts → same pattern, generic retry message
+- Malformed/unparseable JSON from Groq → retry once with a stricter
   prompt; if it fails again, ask the user to rephrase
 - Telegram webhook requests without the correct secret token → reject
   with 401, do not process
@@ -216,10 +223,10 @@ Claude only for field extraction** — cheaper and more predictable.
    messages back. Confirms hosting + webhook delivery work.
 2. **Google auth**: One-time OAuth script produces a refresh token;
    hardcoded test event created successfully via `calendar_client.py`.
-3. **Add flow**: Claude parsing integrated, real events created from
+3. **Add flow**: Groq parsing integrated, real events created from
    free-text messages.
 4. **List flow**: upcoming events fetched and formatted in chat.
-5. **Delete flow**: fuzzy match + disambiguation + deletion.
+5. **Delete and edit flows**: fuzzy match + disambiguation + deletion or patching.
 6. **Hardening**: error handling, timezone edge cases, unauthorized user
    rejection, logging.
 
@@ -231,16 +238,17 @@ Claude only for field extraction** — cheaper and more predictable.
       events
 - [ ] Sending a delete phrase removes the correct event, with
       disambiguation when multiple events could match
+- [ ] Sending an edit phrase updates the correct event, with
+      disambiguation when multiple events could match
 - [ ] Bot ignores/rejects messages from any Telegram user other than the
       owner
 - [ ] Bot recovers gracefully (no crash, clear message) from a Google or
-      Claude API failure
+      Groq API failure
 - [ ] App runs continuously on the chosen free host with the webhook
       correctly registered
 
 ## 14. Open Questions (resolve before/during build)
 
-- Exact Claude model string and current pricing to confirm before
+- Exact Groq model string and current pricing to confirm before
   implementation (verify at build time, not assumed from this spec)
 - Default list window (7 days vs. configurable) — start with 7, revisit
-- Whether "edit existing event" is worth adding in v1 or deferred to v2

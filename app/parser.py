@@ -1,12 +1,12 @@
 from __future__ import annotations
 
 import json
-from datetime import datetime, timedelta
+from datetime import datetime
 
 from groq import Groq
 from pydantic import ValidationError
 
-from .models import CalendarEvent, DeleteMatch, ParsedEvent
+from .models import CalendarEvent, DeleteMatch, ParsedEdit, ParsedEvent
 
 
 class ParseError(RuntimeError):
@@ -41,6 +41,22 @@ Events: {json.dumps(options)}"""
             result.ambiguous = True
         result.candidates = [event for event in result.candidates if event.event_id in valid_ids]
         return result
+
+    def parse_edit(self, message: str, existing: CalendarEvent, timezone_name: str) -> ParsedEdit:
+        current = {
+            "title": existing.title,
+            "start": existing.start.isoformat(),
+            "end": existing.end.isoformat() if existing.end else None,
+            "location": existing.location,
+        }
+        prompt = f"""Apply the user's requested change to the existing calendar event. Return JSON only.
+Timezone: {timezone_name}. Preserve every existing field that the user does not explicitly change.
+If the user specifies only a new start time, preserve the original duration. All datetime values must include an offset.
+Use low confidence if the requested change is ambiguous or incomplete.
+Schema: {{\"action\":\"edit\",\"title\":string,\"start\":ISO8601,\"end\":ISO8601,\"location\":string|null,\"confidence\":\"high\"|\"low\"}}
+Existing event: {json.dumps(current)}
+User request: {message}"""
+        return self._request_model(prompt, ParsedEdit)
 
     def _request_model(self, prompt: str, model_type):
         last_error: Exception | None = None
