@@ -3,7 +3,7 @@ from __future__ import annotations
 import json
 from datetime import datetime, timedelta
 
-from anthropic import Anthropic
+from groq import Groq
 from pydantic import ValidationError
 
 from .models import CalendarEvent, DeleteMatch, ParsedEvent
@@ -13,9 +13,9 @@ class ParseError(RuntimeError):
     pass
 
 
-class ClaudeParser:
+class GroqParser:
     def __init__(self, api_key: str, model: str) -> None:
-        self._client = Anthropic(api_key=api_key)
+        self._client = Groq(api_key=api_key)
         self._model = model
 
     def parse_event(self, message: str, now: datetime, timezone_name: str) -> ParsedEvent:
@@ -46,13 +46,18 @@ Events: {json.dumps(options)}"""
         last_error: Exception | None = None
         for suffix in ("", "\nYour last response was invalid. Output one valid JSON object only, with no code fence."):
             try:
-                response = self._client.messages.create(
+                response = self._client.chat.completions.create(
                     model=self._model, max_tokens=700, temperature=0,
-                    messages=[{"role": "user", "content": prompt + suffix}],
+                    response_format={"type": "json_object"},
+                    messages=[
+                        {"role": "system", "content": "Return valid JSON only. Do not use Markdown."},
+                        {"role": "user", "content": prompt + suffix},
+                    ],
                 )
-                text = "".join(block.text for block in response.content if block.type == "text")
+                text = response.choices[0].message.content
+                if not text:
+                    raise ValueError("Groq returned an empty response")
                 return model_type.model_validate(json.loads(text))
-            except (json.JSONDecodeError, ValidationError, AttributeError) as exc:
+            except (json.JSONDecodeError, ValidationError, AttributeError, IndexError, ValueError) as exc:
                 last_error = exc
-        raise ParseError("Claude returned invalid structured data") from last_error
-
+        raise ParseError("Groq returned invalid structured data") from last_error

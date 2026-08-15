@@ -9,10 +9,10 @@ A private, webhook-based FastAPI service that understands natural-language Teleg
    - Message [@userinfobot](https://t.me/userinfobot) to obtain your numeric ID; use it as `ALLOWED_TELEGRAM_USER_ID`.
    - Generate `TELEGRAM_WEBHOOK_SECRET` locally with `python -c "import secrets; print(secrets.token_urlsafe(32))"`. Do not use the sample value from `.env.example`.
 
-2. **Anthropic key**
-   - Create an account and API key in the [Anthropic Console](https://console.anthropic.com/).
-   - Add billing/credits: the hosting can be free, but Claude API usage is billed by Anthropic. Store the key as `ANTHROPIC_API_KEY`.
-- `ANTHROPIC_MODEL` defaults to `claude-sonnet-4-6`; confirm the model remains available in Anthropic's model documentation before first deploy.
+2. **Groq key**
+   - Create an account and API key in the [Groq Console](https://console.groq.com/keys).
+   - Store it as `GROQ_API_KEY`. Groq's free tier is sufficient for a personal calendar bot, subject to its rate limits.
+   - `GROQ_MODEL` defaults to `openai/gpt-oss-20b`.
 
 3. **Google Calendar OAuth credentials**
    - In [Google Cloud Console](https://console.cloud.google.com/), create a project, enable **Google Calendar API**, and configure the OAuth consent screen. For a personal app, add your Google account as a test user if the app is in Testing.
@@ -58,7 +58,7 @@ Before `git add`, run `git status` and make sure `.env` and `client_secret.json`
 
 1. Create an account at [Render](https://render.com/) and connect GitHub.
 2. Click **New → Blueprint**, select this repository, and approve `render.yaml`.
-3. Generate a webhook secret locally with `python -c "import secrets; print(secrets.token_urlsafe(32))"`. Enter it, along with the other values marked `sync: false`: `TELEGRAM_BOT_TOKEN`, `ALLOWED_TELEGRAM_USER_ID`, `ANTHROPIC_API_KEY`, `GOOGLE_CLIENT_ID`, `GOOGLE_CLIENT_SECRET`, and `GOOGLE_REFRESH_TOKEN`. Keep the webhook secret available for the next step.
+3. Generate a webhook secret locally with `python -c "import secrets; print(secrets.token_urlsafe(32))"`. Enter it, along with the other values marked `sync: false`: `TELEGRAM_BOT_TOKEN`, `ALLOWED_TELEGRAM_USER_ID`, `GROQ_API_KEY`, `GOOGLE_CLIENT_ID`, `GOOGLE_CLIENT_SECRET`, and `GOOGLE_REFRESH_TOKEN`. Keep the webhook secret available for the next step.
 4. Deploy. Once healthy, copy its URL, for example `https://telegram-calendar-bot.onrender.com`.
 5. Register the webhook from PowerShell. Replace all placeholders; do not paste the command into a shell history if it contains your token:
 

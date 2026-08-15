@@ -12,7 +12,7 @@ from fastapi import FastAPI, Header, HTTPException, Request
 from .calendar_client import CalendarClient
 from .config import ConfigurationError, Settings, get_settings
 from .models import CalendarEvent
-from .parser import ClaudeParser, ParseError
+from .parser import GroqParser, ParseError
 from .telegram_client import TelegramClient, valid_webhook_secret
 
 logging.basicConfig(level=logging.INFO)
@@ -34,16 +34,16 @@ pending_deletes: dict[int, PendingDelete] = {}
 _settings: Settings | None = None
 _telegram: TelegramClient | None = None
 _calendar: CalendarClient | None = None
-_parser: ClaudeParser | None = None
+_parser: GroqParser | None = None
 
 
-def dependencies() -> tuple[Settings, TelegramClient, CalendarClient, ClaudeParser]:
+def dependencies() -> tuple[Settings, TelegramClient, CalendarClient, GroqParser]:
     global _settings, _telegram, _calendar, _parser
     if _settings is None:
         _settings = get_settings()
         _telegram = TelegramClient(_settings.telegram_bot_token)
         _calendar = CalendarClient(_settings)
-        _parser = ClaudeParser(_settings.anthropic_api_key, _settings.anthropic_model)
+        _parser = GroqParser(_settings.groq_api_key, _settings.groq_model)
     return _settings, _telegram, _calendar, _parser
 
 
@@ -76,7 +76,7 @@ async def webhook(request: Request, x_telegram_bot_api_secret_token: str | None 
     return {"ok": True}
 
 
-async def handle_message(chat_id: int, text: str, settings: Settings, telegram: TelegramClient, calendar: CalendarClient, parser: ClaudeParser) -> None:
+async def handle_message(chat_id: int, text: str, settings: Settings, telegram: TelegramClient, calendar: CalendarClient, parser: GroqParser) -> None:
     pending = pending_deletes.get(chat_id)
     if pending and pending.expires_at > time.monotonic():
         selected = _selection(text, pending.events)

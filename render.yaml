@@ -16,10 +16,10 @@ services:
         sync: false
       - key: ALLOWED_TELEGRAM_USER_ID
         sync: false
-      - key: ANTHROPIC_API_KEY
+      - key: GROQ_API_KEY
         sync: false
-      - key: ANTHROPIC_MODEL
-        value: claude-sonnet-4-6
+      - key: GROQ_MODEL
+        value: openai/gpt-oss-20b
       - key: GOOGLE_CLIENT_ID
         sync: false
       - key: GOOGLE_CLIENT_SECRET

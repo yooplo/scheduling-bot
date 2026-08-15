@@ -22,8 +22,8 @@ class Settings:
     telegram_bot_token: str
     telegram_webhook_secret: str
     allowed_telegram_user_id: int
-    anthropic_api_key: str
-    anthropic_model: str
+    groq_api_key: str
+    groq_model: str
     google_client_id: str
     google_client_secret: str
     google_refresh_token: str
@@ -47,8 +47,8 @@ def get_settings() -> Settings:
         telegram_bot_token=_required("TELEGRAM_BOT_TOKEN"),
         telegram_webhook_secret=_required("TELEGRAM_WEBHOOK_SECRET"),
         allowed_telegram_user_id=allowed_user_id,
-        anthropic_api_key=_required("ANTHROPIC_API_KEY"),
-        anthropic_model=os.getenv("ANTHROPIC_MODEL", "claude-sonnet-4-6"),
+        groq_api_key=_required("GROQ_API_KEY"),
+        groq_model=os.getenv("GROQ_MODEL", "openai/gpt-oss-20b"),
         google_client_id=_required("GOOGLE_CLIENT_ID"),
         google_client_secret=_required("GOOGLE_CLIENT_SECRET"),
         google_refresh_token=_required("GOOGLE_REFRESH_TOKEN"),
