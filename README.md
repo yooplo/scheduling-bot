@@ -12,7 +12,7 @@ A private, webhook-based FastAPI service that understands natural-language Teleg
 2. **Anthropic key**
    - Create an account and API key in the [Anthropic Console](https://console.anthropic.com/).
    - Add billing/credits: the hosting can be free, but Claude API usage is billed by Anthropic. Store the key as `ANTHROPIC_API_KEY`.
-   - `ANTHROPIC_MODEL` defaults to `claude-sonnet-4-20250514`; confirm the model remains available in Anthropic's model documentation before first deploy.
+- `ANTHROPIC_MODEL` defaults to `claude-sonnet-4-6`; confirm the model remains available in Anthropic's model documentation before first deploy.
 
 3. **Google Calendar OAuth credentials**
    - In [Google Cloud Console](https://console.cloud.google.com/), create a project, enable **Google Calendar API**, and configure the OAuth consent screen. For a personal app, add your Google account as a test user if the app is in Testing.

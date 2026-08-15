@@ -48,11 +48,10 @@ def get_settings() -> Settings:
         telegram_webhook_secret=_required("TELEGRAM_WEBHOOK_SECRET"),
         allowed_telegram_user_id=allowed_user_id,
         anthropic_api_key=_required("ANTHROPIC_API_KEY"),
-        anthropic_model=os.getenv("ANTHROPIC_MODEL", "claude-sonnet-4-20250514"),
+        anthropic_model=os.getenv("ANTHROPIC_MODEL", "claude-sonnet-4-6"),
         google_client_id=_required("GOOGLE_CLIENT_ID"),
         google_client_secret=_required("GOOGLE_CLIENT_SECRET"),
         google_refresh_token=_required("GOOGLE_REFRESH_TOKEN"),
         google_calendar_id=os.getenv("GOOGLE_CALENDAR_ID", "primary"),
         user_timezone=os.getenv("USER_TIMEZONE", "Asia/Singapore"),
     )
-
