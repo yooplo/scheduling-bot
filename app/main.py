@@ -276,7 +276,7 @@ def _format_free_slots(events: list[CalendarEvent], settings: Settings, days: in
     for day in days_to_check:
         day_events = [event for event in events if event.start.astimezone(settings.timezone).date() == day]
         cursor = datetime.combine(day, datetime.min.time(), tzinfo=settings.timezone).replace(hour=9)
-        closing = cursor.replace(hour=18)
+        closing = cursor.replace(hour=23, minute=59)
         for event in sorted(day_events, key=lambda item: item.start):
             start = event.start.astimezone(settings.timezone)
             if start - cursor >= timedelta(hours=1):
@@ -285,7 +285,7 @@ def _format_free_slots(events: list[CalendarEvent], settings: Settings, days: in
                 cursor = max(cursor, event.end.astimezone(settings.timezone))
         if closing - cursor >= timedelta(hours=1):
             slots.append(f"• {cursor:%a} {cursor.day} {cursor:%b}: {_format_clock(cursor)}–{_format_clock(closing)}")
-    return "Free time (9 AM–6 PM):\n" + ("\n".join(slots[:8]) if slots else "No one-hour slots found.")
+    return "Free time (9 AM–11:59 PM):\n" + ("\n".join(slots[:8]) if slots else "No one-hour slots found.")
 
 
 async def _ask_to_select(chat_id: int, action: str, request_text: str, events: list[CalendarEvent], match, telegram: TelegramClient) -> None:
