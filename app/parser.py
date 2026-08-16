@@ -65,6 +65,14 @@ Schema: {{\"reminder_minutes\":integer,\"confidence\":\"high\"|\"low\"}}
 User request: {message}"""
         return self._request_model(prompt, ParsedReminder)
 
+    def parse_reminder_for_event(self, message: str, event: CalendarEvent, timezone_name: str) -> ParsedReminder:
+        prompt = f"""Extract the requested Telegram reminder lead time for this existing event. Return JSON only.
+Event start: {event.start.isoformat()}. User timezone: {timezone_name}.
+If the user gives a clock time (for example, "change the reminder to 8:50pm"), calculate the number of minutes before the event start. Convert days/hours to minutes. Use low confidence if the resulting reminder is not before the event.
+Schema: {{\"reminder_minutes\":integer,\"confidence\":\"high\"|\"low\"}}
+User request: {message}"""
+        return self._request_model(prompt, ParsedReminder)
+
     def _request_model(self, prompt: str, model_type):
         last_error: Exception | None = None
         for suffix in ("", "\nYour last response was invalid. Output one valid JSON object only, with no code fence."):

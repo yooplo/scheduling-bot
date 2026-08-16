@@ -115,7 +115,7 @@ async def handle_message(chat_id: int, text: str, settings: Settings, telegram: 
             elif pending.action == "edit":
                 await _edit_event(chat_id, pending.request_text, selected, settings, telegram, calendar, parser)
             else:
-                await _set_reminder(chat_id, pending.request_text, selected, telegram, calendar, parser)
+                await _set_reminder(chat_id, pending.request_text, selected, settings, telegram, calendar, parser)
             return
         pending_actions.pop(chat_id, None)
     lowered = text.lower()
@@ -139,6 +139,17 @@ async def handle_message(chat_id: int, text: str, settings: Settings, telegram: 
             await telegram.send_message(chat_id, f"✅ Deleted: {selected.title} — {_format_time(selected.start)}")
             return
         await _ask_to_select(chat_id, "delete", text, events, match, telegram)
+    elif _is_existing_reminder_request(lowered):
+        events = await asyncio.to_thread(calendar.list_events, 30)
+        if not events:
+            await telegram.send_message(chat_id, "There are no events in the next 30 days to remind you about.")
+            return
+        match = await asyncio.to_thread(parser.match_event, text, events)
+        selected = next((event for event in events if event.event_id == match.matched_event_id), None)
+        if selected and not match.ambiguous:
+            await _set_reminder(chat_id, text, selected, settings, telegram, calendar, parser)
+            return
+        await _ask_to_select(chat_id, "remind", text, events, match, telegram)
     elif any(word in lowered for word in EDIT_WORDS):
         events = await asyncio.to_thread(calendar.list_events, 30)
         if not events:
@@ -150,17 +161,6 @@ async def handle_message(chat_id: int, text: str, settings: Settings, telegram: 
             await _edit_event(chat_id, text, selected, settings, telegram, calendar, parser)
             return
         await _ask_to_select(chat_id, "edit", text, events, match, telegram)
-    elif lowered.startswith(REMINDER_PREFIXES) and "before" in lowered:
-        events = await asyncio.to_thread(calendar.list_events, 30)
-        if not events:
-            await telegram.send_message(chat_id, "There are no events in the next 30 days to remind you about.")
-            return
-        match = await asyncio.to_thread(parser.match_event, text, events)
-        selected = next((event for event in events if event.event_id == match.matched_event_id), None)
-        if selected and not match.ambiguous:
-            await _set_reminder(chat_id, text, selected, telegram, calendar, parser)
-            return
-        await _ask_to_select(chat_id, "remind", text, events, match, telegram)
     elif any(word in lowered for word in LIST_WORDS):
         if "tomorrow" in lowered or "tmr" in lowered:
             target = datetime.now(settings.timezone).date() + timedelta(days=1)
@@ -210,14 +210,20 @@ async def _edit_event(chat_id: int, text: str, existing: CalendarEvent, settings
     await telegram.send_message(chat_id, f"✅ Updated: {updated.title} — {_format_time(updated.start)}–{_format_time(updated.end)}")
 
 
-async def _set_reminder(chat_id: int, text: str, event: CalendarEvent, telegram: TelegramClient, calendar: CalendarClient, parser: GroqParser) -> None:
-    reminder = await asyncio.to_thread(parser.parse_reminder, text)
+async def _set_reminder(chat_id: int, text: str, event: CalendarEvent, settings: Settings, telegram: TelegramClient, calendar: CalendarClient, parser: GroqParser) -> None:
+    reminder = await asyncio.to_thread(parser.parse_reminder_for_event, text, event, settings.user_timezone)
     if reminder.confidence == "low":
         await telegram.send_message(chat_id, "Tell me when to remind you, for example: 'set a reminder one day before IPPT'.")
         return
     await asyncio.to_thread(calendar.set_reminder, event.event_id, reminder.reminder_minutes)
     unit = "minute" if reminder.reminder_minutes == 1 else "minutes"
     await telegram.send_message(chat_id, f"⏰ Reminder set: {event.title} — {reminder.reminder_minutes} {unit} before {_format_time(event.start)}")
+
+
+def _is_existing_reminder_request(text: str) -> bool:
+    if text.startswith(REMINDER_PREFIXES):
+        return True
+    return "reminder" in text and any(word in text for word in EDIT_WORDS)
 
 
 async def _ask_to_select(chat_id: int, action: str, request_text: str, events: list[CalendarEvent], match, telegram: TelegramClient) -> None:
