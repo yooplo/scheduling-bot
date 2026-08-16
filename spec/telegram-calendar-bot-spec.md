@@ -47,6 +47,7 @@ state file if needed. Runs as a webhook-based web service on a free host
 - `POST /scheduled/daily-agenda` is called once daily at the configured `DAILY_AGENDA_HOUR` in `USER_TIMEZONE` and sends the day's agenda to the owner.
 - Scheduler requests use an `Authorization: Bearer <SCHEDULER_SECRET>` header; direct unauthorised calls are rejected.
 - Users can add a reminder while creating an event or request one for an existing event. Existing-event reminders use the same event matching and disambiguation flow as edits and deletes.
+- **Deployment status:** cron-job.org reminder and daily-agenda jobs are configured and verified. Successful scheduled calls return `204 No Content`.
 ```
 Telegram (user) → Telegram webhook → Web app (FastAPI) → Router
                                                               ├─ Add flow    → LLM (parse) → Google Calendar API (insert)
@@ -279,6 +280,7 @@ Groq only for field extraction** — cheaper and more predictable.
       Groq API failure
 - [ ] App runs continuously on the chosen free host with the webhook
       correctly registered
+- [x] Free external scheduler calls the reminder endpoint every minute and the daily-agenda endpoint at 8:00 AM Asia/Singapore
 
 ## 14. Open Questions (resolve before/during build)
 

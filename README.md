@@ -118,6 +118,10 @@ Create an account at [cron-job.org](https://cron-job.org/). Generate `SCHEDULER_
 Add reminders in natural language, for example: `Dentist tomorrow at 2pm, remind me 30 minutes before`.
 For an existing event, say: `Set a reminder one day before IPPT`.
 
+### Verified scheduler status
+
+The cron-job.org reminder and daily-agenda jobs have been configured and verified with successful `204 No Content` responses. The reminder job runs every minute; the daily agenda runs at 8:00 AM in `Asia/Singapore`.
+
 ## Security notes
 
 - The webhook validates Telegram's secret header before processing anything.
