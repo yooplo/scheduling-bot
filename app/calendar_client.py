@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-from datetime import datetime, timedelta, timezone
+from datetime import date, datetime, time, timedelta, timezone
 from zoneinfo import ZoneInfo
 
 from google.auth.transport.requests import Request
@@ -43,17 +43,25 @@ class CalendarClient:
 
     def list_events(self, days_ahead: int = 7) -> list[CalendarEvent]:
         now = datetime.now(timezone.utc)
+        return self._list_events_between(now, now + timedelta(days=days_ahead))
+
+    def list_events_for_day(self, day: date) -> list[CalendarEvent]:
+        local_timezone = ZoneInfo(self._timezone)
+        start = datetime.combine(day, time.min, tzinfo=local_timezone)
+        return self._list_events_between(start, start + timedelta(days=1))
+
+    def _list_events_between(self, start: datetime, end: datetime) -> list[CalendarEvent]:
         result = self._service.events().list(
             calendarId=self._calendar_id,
-            timeMin=now.isoformat(),
-            timeMax=(now + timedelta(days=days_ahead)).isoformat(),
+            timeMin=start.isoformat(),
+            timeMax=end.isoformat(),
             singleEvents=True,
             orderBy="startTime",
         ).execute()
         events = [_to_event(item, self._timezone) for item in result.get("items", []) if item.get("status") != "cancelled"]
         # Google may include events that began before timeMin but overlap it. Do
         # not show an event once its end time has passed.
-        return [event for event in events if event.end is None or event.end > now]
+        return [event for event in events if event.end is None or event.end > start]
 
     def delete_event(self, event_id: str) -> None:
         self._service.events().delete(calendarId=self._calendar_id, eventId=event_id).execute()

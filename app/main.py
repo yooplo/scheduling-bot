@@ -5,7 +5,7 @@ import logging
 import re
 import time
 from dataclasses import dataclass
-from datetime import datetime
+from datetime import datetime, timedelta
 
 from fastapi import FastAPI, Header, HTTPException, Request
 
@@ -21,7 +21,7 @@ app = FastAPI(title="Telegram Calendar Bot")
 
 DELETE_WORDS = ("delete", "cancel", "remove")
 EDIT_WORDS = ("change", "edit", "move", "reschedule", "update")
-LIST_WORDS = ("list", "show", "what's on", "whats on", "upcoming", "calendar")
+LIST_WORDS = ("list", "show", "what's on", "whats on", "what are my", "upcoming", "calendar", "plans", "schedule")
 PENDING_TTL_SECONDS = 300
 
 
@@ -139,12 +139,22 @@ async def handle_message(chat_id: int, text: str, settings: Settings, telegram: 
             return
         await _ask_to_select(chat_id, "edit", text, events, match, telegram)
     elif any(word in lowered for word in LIST_WORDS):
-        events = await asyncio.to_thread(calendar.list_events, 7)
+        if "tomorrow" in lowered or "tmr" in lowered:
+            target = datetime.now(settings.timezone).date() + timedelta(days=1)
+            events = await asyncio.to_thread(calendar.list_events_for_day, target)
+            heading = "Tomorrow's events"
+        elif "today" in lowered:
+            target = datetime.now(settings.timezone).date()
+            events = await asyncio.to_thread(calendar.list_events_for_day, target)
+            heading = "Today's events"
+        else:
+            events = await asyncio.to_thread(calendar.list_events, 7)
+            heading = "Upcoming events"
         if not events:
-            await telegram.send_message(chat_id, "No events in the next 7 days.")
+            await telegram.send_message(chat_id, f"No events for {heading.lower().replace(' events', '')}.")
         else:
             lines = [f"{index}. {event.title}\n   {_format_event_range(event)}" for index, event in enumerate(events, 1)]
-            await telegram.send_message(chat_id, "Upcoming events:\n\n" + "\n\n".join(lines))
+            await telegram.send_message(chat_id, heading + ":\n\n" + "\n\n".join(lines))
     else:
         now = datetime.now(settings.timezone)
         event = await asyncio.to_thread(parser.parse_event, text, now, settings.user_timezone)
