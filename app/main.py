@@ -191,10 +191,11 @@ async def handle_message(chat_id: int, text: str, settings: Settings, telegram: 
             return
         await _ask_to_select(chat_id, "edit", text, events, match, telegram)
     elif any(word in lowered for word in LIST_WORDS):
-        if "tomorrow" in lowered or "tmr" in lowered:
-            target = datetime.now(settings.timezone).date() + timedelta(days=1)
+        explicit_day = _date_from_text(lowered, settings)
+        if "tomorrow" in lowered or "tmr" in lowered or explicit_day:
+            target = explicit_day or (datetime.now(settings.timezone).date() + timedelta(days=1))
             events = await asyncio.to_thread(calendar.list_events_for_day, target)
-            heading = "Tomorrow's events"
+            heading = "Tomorrow's events" if not explicit_day else f"Events on {target:%a} {target.day} {target:%b}"
         elif "today" in lowered:
             target = datetime.now(settings.timezone).date()
             events = await asyncio.to_thread(calendar.list_events_for_day, target)
