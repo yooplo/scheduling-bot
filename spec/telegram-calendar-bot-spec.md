@@ -2,7 +2,7 @@
 
 ## 1. Overview
 
-A personal Telegram bot that lets the user create, list, and delete Google
+A personal Telegram bot that lets the user create, list, edit, delete, and schedule reminders for Google
 Calendar events by sending natural-language messages (e.g. "dentist
 checkup tomorrow 2-3pm"). The bot parses the message using the Groq
 API into structured event data, then calls the Google Calendar
@@ -15,23 +15,21 @@ state file if needed. Runs as a webhook-based web service on a free host
 ## 2. Goals / Non-Goals
 
 **Goals**
-- Add events via free-text message
-- List upcoming events
-- Delete/cancel or edit events via free-text reference (fuzzy match against
+- Add one-off and weekly recurring events via free-text message
+- List upcoming events, daily schedules, reminders, and free time
+- Delete/cancel or edit events and reminders via free-text reference (fuzzy match against
   upcoming events)
 - Confirm every action back to the user in chat
 - Run reliably on a free-tier host with a webhook (no polling)
 
 **Non-goals (v1)**
 - Multi-user support
-- Recurring event creation
 - Voice message input
+- Multi-calendar support, attendee invitations, and undo
 
 ## 3. Architecture
 
-```
-
-## 3.1 Technology Stack
+### 3.1 Technology Stack
 
 | Layer | Technology | Purpose |
 |---|---|---|
@@ -43,12 +41,13 @@ state file if needed. Runs as a webhook-based web service on a free host
 | External scheduler | cron-job.org | Minute-by-minute reminders and daily agenda delivery |
 | Testing | pytest | Parser, Calendar conversion, and formatting tests |
 
-## 3.2 Scheduled Notifications
+### 3.2 Scheduled Notifications
 
 - `POST /scheduled/reminders` is called every minute by cron-job.org. It validates `SCHEDULER_SECRET`, finds due reminders, sends Telegram messages, and marks each reminder as sent in the event's private Google Calendar metadata.
 - `POST /scheduled/daily-agenda` is called once daily at the configured `DAILY_AGENDA_HOUR` in `USER_TIMEZONE` and sends the day's agenda to the owner.
 - Scheduler requests use an `Authorization: Bearer <SCHEDULER_SECRET>` header; direct unauthorised calls are rejected.
 - Users can add a reminder while creating an event or request one for an existing event. Existing-event reminders use the same event matching and disambiguation flow as edits and deletes.
+```
 Telegram (user) → Telegram webhook → Web app (FastAPI) → Router
                                                               ├─ Add flow    → LLM (parse) → Google Calendar API (insert)
                                                               ├─ List flow   → Google Calendar API (list)
@@ -112,7 +111,9 @@ Groq is prompted to return **only** this JSON shape, no prose:
   "start": "ISO 8601 datetime with timezone",
   "end": "ISO 8601 datetime with timezone",
   "location": "string or null",
-  "confidence": "high | low"
+  "confidence": "high | low",
+  "reminder_minutes": "integer or null",
+  "recurrence": "RFC5545 RRULE string or null"
 }
 ```
 
@@ -160,6 +161,10 @@ language and routed by intent:
 | "dentist checkup tomorrow 2-3pm" | add |
 | "cancel my dentist appointment" / "delete the 2pm meeting" | delete |
 | "move IPPT to 4pm" / "change dentist to Friday" | edit |
+| "reminders" / "show upcoming reminders" | list reminders |
+| "when am I free tmr?" | find free time |
+| "Gym every Monday at 8pm" | add weekly recurring event |
+| "disable reminder for IPPT" | remove reminder |
 | "what's on my calendar this week" / "list upcoming" | list |
 | Reply to a pending disambiguation ("2" or "the second one") | resolve pending delete |
 
@@ -202,6 +207,13 @@ Groq only for field extraction** — cheaper and more predictable.
 3. If ambiguous, present numbered candidates and retain the original edit request for five minutes
 4. Parse the requested change against the selected event, preserving fields the user did not change
 5. If confident, patch the Google Calendar event and confirm the updated time
+
+### 8.5 Reminders, recurring events, conflicts, and free time
+- A reminder can be attached while creating an event or added, changed, listed, or removed later.
+- The scheduler checks reminder metadata every minute and sends the Telegram notification once.
+- Common weekly wording (`every Monday`) becomes a Google Calendar `RRULE:FREQ=WEEKLY;BYDAY=...` series. Recurring-series deletion removes the series master.
+- Before inserting an event, the app checks the next 30 days for overlap. The user must include `add anyway` to override a conflict warning.
+- Free-time requests scan upcoming events and report one-hour-or-longer gaps from 12:00 AM through 11:59 PM.
 
 ## 9. Error Handling
 
@@ -246,7 +258,8 @@ Groq only for field extraction** — cheaper and more predictable.
    free-text messages.
 4. **List flow**: upcoming events fetched and formatted in chat.
 5. **Delete and edit flows**: fuzzy match + disambiguation + deletion or patching.
-6. **Hardening**: error handling, timezone edge cases, unauthorized user
+6. **Scheduling and availability**: reminders, daily agenda, conflicts, recurring events, and free-time listing.
+7. **Hardening**: error handling, timezone edge cases, unauthorized user
    rejection, logging.
 
 ## 13. Acceptance Criteria (v1 done when)
@@ -259,6 +272,7 @@ Groq only for field extraction** — cheaper and more predictable.
       disambiguation when multiple events could match
 - [ ] Sending an edit phrase updates the correct event, with
       disambiguation when multiple events could match
+- [ ] Recurring events, reminder management, conflict warnings, and free-time queries work as documented
 - [ ] Bot ignores/rejects messages from any Telegram user other than the
       owner
 - [ ] Bot recovers gracefully (no crash, clear message) from a Google or

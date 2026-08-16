@@ -4,6 +4,36 @@ A private, webhook-based FastAPI service that understands natural-language Teleg
 
 Include a location naturally when creating an event, for example: `Dinner at La Pasta Saturday 7–9pm`. Locations are shown in upcoming lists when provided.
 
+## What the bot can do
+
+All requests use `USER_TIMEZONE` (normally `Asia/Singapore`).
+
+| Task | Example message |
+|---|---|
+| Add an event | `Dentist tomorrow 2–3pm` |
+| Add a location | `Dinner at La Pasta Saturday 7–9pm` |
+| Add a reminder | `Supper tonight at 9pm, remind me 20 minutes before` |
+| Add a recurring event | `Gym every Monday at 8pm` |
+| List the next 7 days | `list`, `upcoming`, or `schedule` |
+| List today/tomorrow | `plans tmr`, `what are my plans tomorrow?`, or `show my schedule today` |
+| Find availability | `when am I free tmr?` or `find free time this week` |
+| Edit an event | `move IPPT to 4pm` or `update carousel JOOLA to be at Amelia's house` |
+| Delete one event | `remove dentist tomorrow` |
+| Delete a recurring series | `remove the weekly Monday gym sessions` |
+| Set/change a reminder | `set a reminder one day before IPPT` or `change the reminder for supper to 8:50pm` |
+| Remove a reminder | `disable reminder for IPPT` |
+| List reminders | `reminders` or `show me all upcoming reminders` |
+
+The bot warns before creating an event that overlaps an upcoming event. To deliberately create it anyway, repeat the request with `add anyway`, for example `add anyway meeting tomorrow 2–3pm`.
+
+Free-time results cover the full day, from 12:00 AM through 11:59 PM, and show slots of at least one hour.
+
+## Current limitations
+
+- One authorised Telegram user and one Google Calendar only.
+- No voice-message transcription, invitees/attendees, multiple calendars, or undo action.
+- Scheduler-based reminders and daily agenda require the cron-job.org setup below; confirm successful `204` job runs before relying on them.
+
 ## What you need before deployment
 
 1. **Telegram bot token and user ID**
