@@ -26,6 +26,11 @@ class ParsedEdit(BaseModel):
     confidence: Literal["high", "low"]
 
 
+class ParsedReminder(BaseModel):
+    reminder_minutes: int = Field(ge=1, le=10080)
+    confidence: Literal["high", "low"]
+
+
 class CandidateEvent(BaseModel):
     event_id: str
     title: str

@@ -21,6 +21,7 @@ app = FastAPI(title="Telegram Calendar Bot")
 
 DELETE_WORDS = ("delete", "cancel", "remove")
 EDIT_WORDS = ("change", "edit", "move", "reschedule", "update")
+REMINDER_PREFIXES = ("set a reminder", "remind me")
 LIST_WORDS = ("list", "show", "what's on", "whats on", "what are my", "upcoming", "calendar", "plans", "schedule")
 PENDING_TTL_SECONDS = 300
 
@@ -110,8 +111,10 @@ async def handle_message(chat_id: int, text: str, settings: Settings, telegram: 
             pending_actions.pop(chat_id, None)
             if pending.action == "delete":
                 await _delete_event(chat_id, selected, telegram, calendar)
-            else:
+            elif pending.action == "edit":
                 await _edit_event(chat_id, pending.request_text, selected, settings, telegram, calendar, parser)
+            else:
+                await _set_reminder(chat_id, pending.request_text, selected, telegram, calendar, parser)
             return
         pending_actions.pop(chat_id, None)
     lowered = text.lower()
@@ -138,6 +141,17 @@ async def handle_message(chat_id: int, text: str, settings: Settings, telegram: 
             await _edit_event(chat_id, text, selected, settings, telegram, calendar, parser)
             return
         await _ask_to_select(chat_id, "edit", text, events, match, telegram)
+    elif lowered.startswith(REMINDER_PREFIXES) and "before" in lowered:
+        events = await asyncio.to_thread(calendar.list_events, 30)
+        if not events:
+            await telegram.send_message(chat_id, "There are no events in the next 30 days to remind you about.")
+            return
+        match = await asyncio.to_thread(parser.match_event, text, events)
+        selected = next((event for event in events if event.event_id == match.matched_event_id), None)
+        if selected and not match.ambiguous:
+            await _set_reminder(chat_id, text, selected, telegram, calendar, parser)
+            return
+        await _ask_to_select(chat_id, "remind", text, events, match, telegram)
     elif any(word in lowered for word in LIST_WORDS):
         if "tomorrow" in lowered or "tmr" in lowered:
             target = datetime.now(settings.timezone).date() + timedelta(days=1)
@@ -182,11 +196,21 @@ async def _edit_event(chat_id: int, text: str, existing: CalendarEvent, settings
     await telegram.send_message(chat_id, f"✅ Updated: {updated.title} — {_format_time(updated.start)}–{_format_time(updated.end)}")
 
 
+async def _set_reminder(chat_id: int, text: str, event: CalendarEvent, telegram: TelegramClient, calendar: CalendarClient, parser: GroqParser) -> None:
+    reminder = await asyncio.to_thread(parser.parse_reminder, text)
+    if reminder.confidence == "low":
+        await telegram.send_message(chat_id, "Tell me when to remind you, for example: 'set a reminder one day before IPPT'.")
+        return
+    await asyncio.to_thread(calendar.set_reminder, event.event_id, reminder.reminder_minutes)
+    unit = "minute" if reminder.reminder_minutes == 1 else "minutes"
+    await telegram.send_message(chat_id, f"⏰ Reminder set: {event.title} — {reminder.reminder_minutes} {unit} before {_format_time(event.start)}")
+
+
 async def _ask_to_select(chat_id: int, action: str, request_text: str, events: list[CalendarEvent], match, telegram: TelegramClient) -> None:
     choices = [event for event in events if event.event_id in {candidate.event_id for candidate in match.candidates}] or events[:5]
     pending_actions[chat_id] = PendingAction(choices, time.monotonic() + PENDING_TTL_SECONDS, action, request_text)
     lines = [f"{i}. {event.title} — {_format_time(event.start)}" for i, event in enumerate(choices, 1)]
-    verb = "edit" if action == "edit" else "delete"
+    verb = {"edit": "edit", "delete": "delete", "remind": "set a reminder for"}[action]
     await telegram.send_message(chat_id, f"Which event should I {verb}? Reply with a number:\n" + "\n".join(lines))
 
 

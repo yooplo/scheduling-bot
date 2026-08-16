@@ -82,6 +82,13 @@ class CalendarClient:
         private["telegram_reminder_sent"] = "true"
         self._service.events().patch(calendarId=self._calendar_id, eventId=event_id, body={"extendedProperties": {"private": private}}).execute()
 
+    def set_reminder(self, event_id: str, reminder_minutes: int) -> None:
+        item = self._service.events().get(calendarId=self._calendar_id, eventId=event_id).execute()
+        private = item.get("extendedProperties", {}).get("private", {})
+        private["telegram_reminder_minutes"] = str(reminder_minutes)
+        private.pop("telegram_reminder_sent", None)
+        self._service.events().patch(calendarId=self._calendar_id, eventId=event_id, body={"extendedProperties": {"private": private}}).execute()
+
     def update_event(self, event_id: str, event: ParsedEdit) -> CalendarEvent:
         body = {
             "summary": event.title,

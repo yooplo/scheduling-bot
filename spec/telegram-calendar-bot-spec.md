@@ -48,6 +48,7 @@ state file if needed. Runs as a webhook-based web service on a free host
 - `POST /scheduled/reminders` is called every minute by cron-job.org. It validates `SCHEDULER_SECRET`, finds due reminders, sends Telegram messages, and marks each reminder as sent in the event's private Google Calendar metadata.
 - `POST /scheduled/daily-agenda` is called once daily at the configured `DAILY_AGENDA_HOUR` in `USER_TIMEZONE` and sends the day's agenda to the owner.
 - Scheduler requests use an `Authorization: Bearer <SCHEDULER_SECRET>` header; direct unauthorised calls are rejected.
+- Users can add a reminder while creating an event or request one for an existing event. Existing-event reminders use the same event matching and disambiguation flow as edits and deletes.
 Telegram (user) → Telegram webhook → Web app (FastAPI) → Router
                                                               ├─ Add flow    → LLM (parse) → Google Calendar API (insert)
                                                               ├─ List flow   → Google Calendar API (list)

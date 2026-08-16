@@ -6,7 +6,7 @@ from datetime import datetime
 from groq import Groq
 from pydantic import ValidationError
 
-from .models import CalendarEvent, DeleteMatch, ParsedEdit, ParsedEvent
+from .models import CalendarEvent, DeleteMatch, ParsedEdit, ParsedEvent, ParsedReminder
 
 
 class ParseError(RuntimeError):
@@ -57,6 +57,13 @@ Schema: {{\"action\":\"edit\",\"title\":string,\"start\":ISO8601,\"end\":ISO8601
 Existing event: {json.dumps(current)}
 User request: {message}"""
         return self._request_model(prompt, ParsedEdit)
+
+    def parse_reminder(self, message: str) -> ParsedReminder:
+        prompt = f"""Extract only the reminder lead time from the user's request. Return JSON only.
+Convert days and hours to whole minutes (one day is 1440 minutes). Use low confidence if no clear lead time is given.
+Schema: {{\"reminder_minutes\":integer,\"confidence\":\"high\"|\"low\"}}
+User request: {message}"""
+        return self._request_model(prompt, ParsedReminder)
 
     def _request_model(self, prompt: str, model_type):
         last_error: Exception | None = None

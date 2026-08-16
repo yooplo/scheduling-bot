@@ -84,6 +84,7 @@ Create an account at [cron-job.org](https://cron-job.org/). Generate `SCHEDULER_
 - Daily at 08:00, timezone `Asia/Singapore`: `https://YOUR-SERVICE.onrender.com/scheduled/daily-agenda`
 
 Add reminders in natural language, for example: `Dentist tomorrow at 2pm, remind me 30 minutes before`.
+For an existing event, say: `Set a reminder one day before IPPT`.
 
 ## Security notes
 
