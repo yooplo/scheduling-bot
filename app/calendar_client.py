@@ -38,6 +38,8 @@ class CalendarClient:
             body["location"] = event.location
         if event.reminder_minutes:
             body["extendedProperties"] = {"private": {"telegram_reminder_minutes": str(event.reminder_minutes)}}
+        if event.recurrence:
+            body["recurrence"] = [event.recurrence]
         item = self._service.events().insert(calendarId=self._calendar_id, body=body).execute()
         return _to_event(item, self._timezone)
 
@@ -86,6 +88,13 @@ class CalendarClient:
         item = self._service.events().get(calendarId=self._calendar_id, eventId=event_id).execute()
         private = item.get("extendedProperties", {}).get("private", {})
         private["telegram_reminder_minutes"] = str(reminder_minutes)
+        private.pop("telegram_reminder_sent", None)
+        self._service.events().patch(calendarId=self._calendar_id, eventId=event_id, body={"extendedProperties": {"private": private}}).execute()
+
+    def clear_reminder(self, event_id: str) -> None:
+        item = self._service.events().get(calendarId=self._calendar_id, eventId=event_id).execute()
+        private = item.get("extendedProperties", {}).get("private", {})
+        private.pop("telegram_reminder_minutes", None)
         private.pop("telegram_reminder_sent", None)
         self._service.events().patch(calendarId=self._calendar_id, eventId=event_id, body={"extendedProperties": {"private": private}}).execute()
 

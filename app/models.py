@@ -14,6 +14,7 @@ class ParsedEvent(BaseModel):
     location: str | None = Field(default=None, max_length=500)
     confidence: Literal["high", "low"]
     reminder_minutes: int | None = Field(default=None, ge=1, le=10080)
+    recurrence: str | None = None
 
 
 class ParsedEdit(BaseModel):

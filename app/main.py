@@ -23,6 +23,7 @@ DELETE_WORDS = ("delete", "cancel", "remove")
 EDIT_WORDS = ("change", "edit", "move", "reschedule", "update")
 REMINDER_PREFIXES = ("set a reminder", "add a reminder", "remind me")
 REMINDER_LIST_PHRASES = ("reminders", "upcoming reminders", "all reminders", "show reminders", "my reminders")
+FREE_TIME_PHRASES = ("when am i free", "when i'm free", "find free time", "free slot", "availability")
 LIST_WORDS = ("list", "show", "what's on", "whats on", "what are my", "upcoming", "calendar", "plans", "schedule")
 PENDING_TTL_SECONDS = 300
 
@@ -114,12 +115,28 @@ async def handle_message(chat_id: int, text: str, settings: Settings, telegram: 
                 await _delete_event(chat_id, selected, telegram, calendar)
             elif pending.action == "edit":
                 await _edit_event(chat_id, pending.request_text, selected, settings, telegram, calendar, parser)
+            elif pending.action == "clear_reminder":
+                await asyncio.to_thread(calendar.clear_reminder, selected.event_id)
+                await telegram.send_message(chat_id, f"🔕 Reminder removed: {selected.title}")
             else:
                 await _set_reminder(chat_id, pending.request_text, selected, settings, telegram, calendar, parser)
             return
         pending_actions.pop(chat_id, None)
     lowered = text.lower()
-    if any(phrase in lowered for phrase in REMINDER_LIST_PHRASES):
+    if any(phrase in lowered for phrase in FREE_TIME_PHRASES):
+        target_days = 1 if ("tomorrow" in lowered or "tmr" in lowered) else 7
+        events = await asyncio.to_thread(calendar.list_events, target_days)
+        await telegram.send_message(chat_id, _format_free_slots(events, settings, target_days))
+    elif "reminder" in lowered and any(word in lowered for word in ("remove", "disable", "cancel", "delete")):
+        events = await asyncio.to_thread(calendar.list_events, 30)
+        match = await asyncio.to_thread(parser.match_event, text, events)
+        selected = next((event for event in events if event.event_id == match.matched_event_id), None)
+        if selected and not match.ambiguous:
+            await asyncio.to_thread(calendar.clear_reminder, selected.event_id)
+            await telegram.send_message(chat_id, f"🔕 Reminder removed: {selected.title}")
+            return
+        await _ask_to_select(chat_id, "clear_reminder", text, events, match, telegram)
+    elif any(phrase in lowered for phrase in REMINDER_LIST_PHRASES):
         events = await asyncio.to_thread(calendar.list_events, 30)
         reminders = [event for event in events if event.reminder_minutes and not event.reminder_sent]
         if not reminders:
@@ -188,6 +205,11 @@ async def handle_message(chat_id: int, text: str, settings: Settings, telegram: 
         if event.start.tzinfo is None or event.end.tzinfo is None:
             await telegram.send_message(chat_id, "Please include a date and time with enough detail for me to schedule it.")
             return
+        conflicts = [existing for existing in await asyncio.to_thread(calendar.list_events, 30) if existing.start < event.end and (existing.end or existing.start) > event.start]
+        if conflicts and "add anyway" not in lowered:
+            details = "\n".join(f"• {existing.title} — {_format_event_range(existing)}" for existing in conflicts[:3])
+            await telegram.send_message(chat_id, "⚠️ This overlaps with:\n" + details + "\n\nReply with 'add anyway' plus your event details to continue.")
+            return
         created = await asyncio.to_thread(calendar.create_event, event)
         reminder_confirmation = ""
         if event.reminder_minutes:
@@ -226,11 +248,30 @@ def _is_existing_reminder_request(text: str) -> bool:
     return "reminder" in text and any(word in text for word in EDIT_WORDS)
 
 
+def _format_free_slots(events: list[CalendarEvent], settings: Settings, days: int) -> str:
+    now = datetime.now(settings.timezone)
+    days_to_check = [now.date() + timedelta(days=offset) for offset in range(1 if days == 1 else days)]
+    slots: list[str] = []
+    for day in days_to_check:
+        day_events = [event for event in events if event.start.astimezone(settings.timezone).date() == day]
+        cursor = datetime.combine(day, datetime.min.time(), tzinfo=settings.timezone).replace(hour=9)
+        closing = cursor.replace(hour=18)
+        for event in sorted(day_events, key=lambda item: item.start):
+            start = event.start.astimezone(settings.timezone)
+            if start - cursor >= timedelta(hours=1):
+                slots.append(f"• {cursor:%a} {cursor.day} {cursor:%b}: {_format_clock(cursor)}–{_format_clock(start)}")
+            if event.end:
+                cursor = max(cursor, event.end.astimezone(settings.timezone))
+        if closing - cursor >= timedelta(hours=1):
+            slots.append(f"• {cursor:%a} {cursor.day} {cursor:%b}: {_format_clock(cursor)}–{_format_clock(closing)}")
+    return "Free time (9 AM–6 PM):\n" + ("\n".join(slots[:8]) if slots else "No one-hour slots found.")
+
+
 async def _ask_to_select(chat_id: int, action: str, request_text: str, events: list[CalendarEvent], match, telegram: TelegramClient) -> None:
     choices = [event for event in events if event.event_id in {candidate.event_id for candidate in match.candidates}] or events[:5]
     pending_actions[chat_id] = PendingAction(choices, time.monotonic() + PENDING_TTL_SECONDS, action, request_text)
     lines = [f"{i}. {event.title} — {_format_time(event.start)}" for i, event in enumerate(choices, 1)]
-    verb = {"edit": "edit", "delete": "delete", "remind": "set a reminder for"}[action]
+    verb = {"edit": "edit", "delete": "delete", "remind": "set a reminder for", "clear_reminder": "remove the reminder for"}[action]
     await telegram.send_message(chat_id, f"Which event should I {verb}? Reply with a number:\n" + "\n".join(lines))
 
 
