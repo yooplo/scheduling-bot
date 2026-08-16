@@ -124,9 +124,14 @@ async def handle_message(chat_id: int, text: str, settings: Settings, telegram: 
         pending_actions.pop(chat_id, None)
     lowered = text.lower()
     if any(phrase in lowered for phrase in FREE_TIME_PHRASES):
-        target_days = 1 if ("tomorrow" in lowered or "tmr" in lowered) else 7
-        events = await asyncio.to_thread(calendar.list_events, target_days)
-        await telegram.send_message(chat_id, _format_free_slots(events, settings, target_days))
+        tomorrow = "tomorrow" in lowered or "tmr" in lowered
+        if tomorrow:
+            target_day = datetime.now(settings.timezone).date() + timedelta(days=1)
+            events = await asyncio.to_thread(calendar.list_events_for_day, target_day)
+            await telegram.send_message(chat_id, _format_free_slots(events, settings, 1, target_day))
+        else:
+            events = await asyncio.to_thread(calendar.list_events, 7)
+            await telegram.send_message(chat_id, _format_free_slots(events, settings, 7))
     elif "reminder" in lowered and any(word in lowered for word in ("remove", "disable", "cancel", "delete")):
         events = await asyncio.to_thread(calendar.list_events, 30)
         match = await asyncio.to_thread(parser.match_event, text, events)
@@ -263,9 +268,10 @@ def _is_existing_reminder_request(text: str) -> bool:
     return "reminder" in text and any(word in text for word in EDIT_WORDS)
 
 
-def _format_free_slots(events: list[CalendarEvent], settings: Settings, days: int) -> str:
+def _format_free_slots(events: list[CalendarEvent], settings: Settings, days: int, start_day=None) -> str:
     now = datetime.now(settings.timezone)
-    days_to_check = [now.date() + timedelta(days=offset) for offset in range(1 if days == 1 else days)]
+    first_day = start_day or now.date()
+    days_to_check = [first_day + timedelta(days=offset) for offset in range(1 if days == 1 else days)]
     slots: list[str] = []
     for day in days_to_check:
         day_events = [event for event in events if event.start.astimezone(settings.timezone).date() == day]
