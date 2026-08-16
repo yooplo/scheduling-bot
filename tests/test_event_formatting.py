@@ -1,6 +1,7 @@
 from datetime import datetime
+from zoneinfo import ZoneInfo
 
-from app.main import _apply_recurrence_from_text, _format_event_listing, _format_event_range, _format_update_confirmation, _reminder_minutes_from_text
+from app.main import _apply_recurrence_from_text, _date_from_text, _format_event_listing, _format_event_range, _format_update_confirmation, _reminder_minutes_from_text
 from app.models import ParsedEvent
 from app.models import CalendarEvent
 
@@ -46,3 +47,10 @@ def test_weekly_recurrence_moves_event_to_named_weekday():
 def test_update_confirmation_includes_location():
     event = CalendarEvent(event_id="1", title="Carousel", location="Amelia's house", start=datetime.fromisoformat("2026-08-17T14:00:00+08:00"), end=datetime.fromisoformat("2026-08-17T15:00:00+08:00"))
     assert "📍 Amelia's house" in _format_update_confirmation(event)
+
+
+def test_explicit_date_is_extracted_from_free_time_query():
+    class Settings:
+        timezone = ZoneInfo("Asia/Singapore")
+    # A real Settings instance is unnecessary: the parser only needs its timezone name.
+    assert _date_from_text("when am i free on 19 august", Settings()).day == 19
