@@ -149,6 +149,12 @@ async def handle_message(chat_id: int, text: str, settings: Settings, telegram: 
         if not events:
             await telegram.send_message(chat_id, "There are no events in the next 30 days to delete.")
             return
+        if ("weekly" in lowered or "recurring" in lowered) and (series_matches := [event for event in events if event.title.lower() in lowered and event.recurring_event_id]):
+            unique_series = {event.recurring_event_id for event in series_matches}
+            if len(unique_series) == 1:
+                await asyncio.to_thread(calendar.delete_series, series_matches[0])
+                await telegram.send_message(chat_id, f"✅ Deleted recurring series: {series_matches[0].title}")
+                return
         match = await asyncio.to_thread(parser.match_event, text, events)
         selected = next((e for e in events if e.event_id == match.matched_event_id), None)
         if selected and not match.ambiguous:

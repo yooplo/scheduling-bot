@@ -54,3 +54,4 @@ class CalendarEvent(BaseModel):
     location: str | None = None
     reminder_minutes: int | None = None
     reminder_sent: bool = False
+    recurring_event_id: str | None = None

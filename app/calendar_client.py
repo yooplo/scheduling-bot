@@ -68,6 +68,9 @@ class CalendarClient:
     def delete_event(self, event_id: str) -> None:
         self._service.events().delete(calendarId=self._calendar_id, eventId=event_id).execute()
 
+    def delete_series(self, event: CalendarEvent) -> None:
+        self.delete_event(event.recurring_event_id or event.event_id)
+
     def due_reminders(self) -> list[CalendarEvent]:
         now = datetime.now(timezone.utc)
         due = []
@@ -130,4 +133,5 @@ def _to_event(item: dict, timezone_name: str = "UTC") -> CalendarEvent:
         location=item.get("location"),
         reminder_minutes=int(reminder) if reminder and reminder.isdigit() else None,
         reminder_sent=properties.get("telegram_reminder_sent") == "true",
+        recurring_event_id=item.get("recurringEventId"),
     )
