@@ -7,7 +7,7 @@ import time
 from dataclasses import dataclass
 from datetime import datetime, timedelta
 
-from fastapi import FastAPI, Header, HTTPException, Request
+from fastapi import FastAPI, Header, HTTPException, Request, Response
 
 from .calendar_client import CalendarClient
 from .config import ConfigurationError, Settings, get_settings
@@ -80,7 +80,7 @@ async def webhook(request: Request, x_telegram_bot_api_secret_token: str | None 
 
 
 @app.post("/scheduled/reminders")
-async def scheduled_reminders(authorization: str | None = Header(default=None)) -> dict[str, int]:
+async def scheduled_reminders(authorization: str | None = Header(default=None)) -> Response:
     settings, telegram, calendar, _ = dependencies()
     if authorization != f"Bearer {settings.scheduler_secret}":
         raise HTTPException(status_code=401, detail="Invalid scheduler secret")
@@ -88,18 +88,18 @@ async def scheduled_reminders(authorization: str | None = Header(default=None)) 
     for event in events:
         await telegram.send_message(settings.allowed_telegram_user_id, f"⏰ Reminder: {event.title} starts at {_format_time(event.start)}")
         await asyncio.to_thread(calendar.mark_reminder_sent, event.event_id)
-    return {"sent": len(events)}
+    return Response(status_code=204)
 
 
 @app.post("/scheduled/daily-agenda")
-async def scheduled_daily_agenda(authorization: str | None = Header(default=None)) -> dict[str, int]:
+async def scheduled_daily_agenda(authorization: str | None = Header(default=None)) -> Response:
     settings, telegram, calendar, _ = dependencies()
     if authorization != f"Bearer {settings.scheduler_secret}":
         raise HTTPException(status_code=401, detail="Invalid scheduler secret")
     events = await asyncio.to_thread(calendar.list_events, 1)
     lines = [f"• {event.title}\n  {_format_event_range(event)}" for event in events]
     await telegram.send_message(settings.allowed_telegram_user_id, "☀️ Today's agenda:\n\n" + ("\n\n".join(lines) if lines else "No upcoming events today."))
-    return {"events": len(events)}
+    return Response(status_code=204)
 
 
 async def handle_message(chat_id: int, text: str, settings: Settings, telegram: TelegramClient, calendar: CalendarClient, parser: GroqParser) -> None:
