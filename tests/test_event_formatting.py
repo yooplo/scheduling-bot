@@ -1,6 +1,6 @@
 from datetime import datetime
 
-from app.main import _format_event_listing, _format_event_range
+from app.main import _format_event_listing, _format_event_range, _reminder_minutes_from_text
 from app.models import CalendarEvent
 
 
@@ -29,3 +29,7 @@ def test_event_listing_includes_location_when_provided():
         end=datetime.fromisoformat("2026-08-15T21:00:00+08:00"),
     )
     assert "📍 La Pasta" in _format_event_listing(event, index=1)
+
+
+def test_reminder_minutes_supports_compact_minute_phrase():
+    assert _reminder_minutes_from_text("remind me 20minutes before") == 20

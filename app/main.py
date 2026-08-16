@@ -22,6 +22,7 @@ app = FastAPI(title="Telegram Calendar Bot")
 DELETE_WORDS = ("delete", "cancel", "remove")
 EDIT_WORDS = ("change", "edit", "move", "reschedule", "update")
 REMINDER_PREFIXES = ("set a reminder", "remind me")
+REMINDER_LIST_PHRASES = ("upcoming reminders", "all reminders", "show reminders", "my reminders")
 LIST_WORDS = ("list", "show", "what's on", "whats on", "what are my", "upcoming", "calendar", "plans", "schedule")
 PENDING_TTL_SECONDS = 300
 
@@ -118,7 +119,15 @@ async def handle_message(chat_id: int, text: str, settings: Settings, telegram: 
             return
         pending_actions.pop(chat_id, None)
     lowered = text.lower()
-    if any(word in lowered for word in DELETE_WORDS):
+    if any(phrase in lowered for phrase in REMINDER_LIST_PHRASES):
+        events = await asyncio.to_thread(calendar.list_events, 30)
+        reminders = [event for event in events if event.reminder_minutes and not event.reminder_sent]
+        if not reminders:
+            await telegram.send_message(chat_id, "No upcoming Telegram reminders.")
+        else:
+            lines = [_format_reminder_listing(event, index) for index, event in enumerate(reminders, 1)]
+            await telegram.send_message(chat_id, "Upcoming reminders:\n\n" + "\n\n".join(lines))
+    elif any(word in lowered for word in DELETE_WORDS):
         events = await asyncio.to_thread(calendar.list_events, 30)
         if not events:
             await telegram.send_message(chat_id, "There are no events in the next 30 days to delete.")
@@ -172,6 +181,7 @@ async def handle_message(chat_id: int, text: str, settings: Settings, telegram: 
     else:
         now = datetime.now(settings.timezone)
         event = await asyncio.to_thread(parser.parse_event, text, now, settings.user_timezone)
+        event.reminder_minutes = event.reminder_minutes or _reminder_minutes_from_text(text)
         if event.confidence == "low":
             await telegram.send_message(chat_id, "I need a clearer date and time. For example: 'dentist tomorrow 2–3pm'.")
             return
@@ -179,7 +189,11 @@ async def handle_message(chat_id: int, text: str, settings: Settings, telegram: 
             await telegram.send_message(chat_id, "Please include a date and time with enough detail for me to schedule it.")
             return
         created = await asyncio.to_thread(calendar.create_event, event)
-        await telegram.send_message(chat_id, f"✅ Added: {created.title} — {_format_time(created.start)}–{_format_time(created.end)}")
+        reminder_confirmation = ""
+        if event.reminder_minutes:
+            unit = "minute" if event.reminder_minutes == 1 else "minutes"
+            reminder_confirmation = f"\n⏰ Reminder set: {event.reminder_minutes} {unit} before"
+        await telegram.send_message(chat_id, f"✅ Added: {created.title} — {_format_time(created.start)}–{_format_time(created.end)}{reminder_confirmation}")
 
 
 async def _delete_event(chat_id: int, event: CalendarEvent, telegram: TelegramClient, calendar: CalendarClient) -> None:
@@ -251,6 +265,30 @@ def _format_event_listing(event: CalendarEvent, index: int | None = None, bullet
     if event.location:
         lines.append(f"   📍 {event.location}")
     return "\n".join(lines)
+
+
+def _format_reminder_listing(event: CalendarEvent, index: int) -> str:
+    assert event.reminder_minutes is not None
+    reminder_at = event.start - timedelta(minutes=event.reminder_minutes)
+    unit = "minute" if event.reminder_minutes == 1 else "minutes"
+    return f"{index}. {event.title}\n   ⏰ {_format_time(reminder_at)} ({event.reminder_minutes} {unit} before)\n   📅 {_format_event_range(event)}"
+
+
+def _reminder_minutes_from_text(text: str) -> int | None:
+    """Handle common reminder expressions even if the LLM omits the optional field."""
+    lowered = text.lower()
+    match = re.search(r"\b(\d+)\s*(minutes?|mins?|hours?|hrs?|days?)\s+before\b", lowered)
+    if match:
+        amount = int(match.group(1))
+        unit = match.group(2)
+        multiplier = 1440 if unit.startswith("day") else 60 if unit.startswith(("hour", "hr")) else 1
+        return amount * multiplier
+    words = {"one": 1, "a": 1, "an": 1, "two": 2, "three": 3}
+    match = re.search(r"\b(one|a|an|two|three)\s+(minutes?|hours?|days?)\s+before\b", lowered)
+    if match:
+        multiplier = 1440 if match.group(2).startswith("day") else 60 if match.group(2).startswith("hour") else 1
+        return words[match.group(1)] * multiplier
+    return None
 
 
 def _format_clock(value: datetime) -> str:
