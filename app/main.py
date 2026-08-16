@@ -98,7 +98,7 @@ async def scheduled_daily_agenda(authorization: str | None = Header(default=None
     if authorization != f"Bearer {settings.scheduler_secret}":
         raise HTTPException(status_code=401, detail="Invalid scheduler secret")
     events = await asyncio.to_thread(calendar.list_events, 1)
-    lines = [f"• {event.title}\n  {_format_event_range(event)}" for event in events]
+    lines = [_format_event_listing(event, bullet=True) for event in events]
     await telegram.send_message(settings.allowed_telegram_user_id, "☀️ Today's agenda:\n\n" + ("\n\n".join(lines) if lines else "No upcoming events today."))
     return Response(status_code=204)
 
@@ -167,7 +167,7 @@ async def handle_message(chat_id: int, text: str, settings: Settings, telegram: 
         if not events:
             await telegram.send_message(chat_id, f"No events for {heading.lower().replace(' events', '')}.")
         else:
-            lines = [f"{index}. {event.title}\n   {_format_event_range(event)}" for index, event in enumerate(events, 1)]
+            lines = [_format_event_listing(event, index=index) for index, event in enumerate(events, 1)]
             await telegram.send_message(chat_id, heading + ":\n\n" + "\n\n".join(lines))
     else:
         now = datetime.now(settings.timezone)
@@ -243,6 +243,14 @@ def _format_event_range(event: CalendarEvent) -> str:
         return f"{start_date} · {start_time}–{end_time}"
     end_date = f"{end:%a} {end.day} {end:%b}"
     return f"{start_date} {start_time} → {end_date} {end_time}"
+
+
+def _format_event_listing(event: CalendarEvent, index: int | None = None, bullet: bool = False) -> str:
+    prefix = "•" if bullet else f"{index}."
+    lines = [f"{prefix} {event.title}", f"   {_format_event_range(event)}"]
+    if event.location:
+        lines.append(f"   📍 {event.location}")
+    return "\n".join(lines)
 
 
 def _format_clock(value: datetime) -> str:

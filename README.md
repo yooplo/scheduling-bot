@@ -2,6 +2,8 @@
 
 A private, webhook-based FastAPI service that understands natural-language Telegram messages and creates, lists, or deletes events in one Google Calendar. It only accepts messages from the configured Telegram user ID.
 
+Include a location naturally when creating an event, for example: `Dinner at La Pasta Saturday 7–9pm`. Locations are shown in upcoming lists when provided.
+
 ## What you need before deployment
 
 1. **Telegram bot token and user ID**

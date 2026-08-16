@@ -1,6 +1,6 @@
 from datetime import datetime
 
-from app.main import _format_event_range
+from app.main import _format_event_listing, _format_event_range
 from app.models import CalendarEvent
 
 
@@ -20,3 +20,12 @@ def test_event_range_shows_both_dates_when_crossing_midnight():
         end=datetime.fromisoformat("2026-08-16T01:00:00+08:00"),
     )
     assert _format_event_range(event) == "Sat 15 Aug 11:00 PM → Sun 16 Aug 1:00 AM"
+
+
+def test_event_listing_includes_location_when_provided():
+    event = CalendarEvent(
+        event_id="1", title="Dinner", location="La Pasta",
+        start=datetime.fromisoformat("2026-08-15T19:00:00+08:00"),
+        end=datetime.fromisoformat("2026-08-15T21:00:00+08:00"),
+    )
+    assert "📍 La Pasta" in _format_event_listing(event, index=1)
