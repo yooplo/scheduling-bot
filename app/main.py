@@ -11,7 +11,7 @@ from fastapi import FastAPI, Header, HTTPException, Request, Response
 
 from .calendar_client import CalendarClient
 from .config import ConfigurationError, Settings, get_settings
-from .models import CalendarEvent
+from .models import CalendarEvent, ParsedEdit
 from .parser import GroqParser, ParseError
 from .telegram_client import TelegramClient, valid_webhook_secret
 
@@ -226,7 +226,14 @@ async def _delete_event(chat_id: int, event: CalendarEvent, telegram: TelegramCl
 
 
 async def _edit_event(chat_id: int, text: str, existing: CalendarEvent, settings: Settings, telegram: TelegramClient, calendar: CalendarClient, parser: GroqParser) -> None:
-    edited = await asyncio.to_thread(parser.parse_edit, text, existing, settings.user_timezone)
+    location_match = re.search(r"\b(?:to\s+be\s+)?at\s+(.+?)\s*$", text, flags=re.IGNORECASE)
+    if location_match:
+        edited = ParsedEdit(
+            title=existing.title, start=existing.start, end=existing.end or existing.start,
+            location=location_match.group(1).strip(), confidence="high",
+        )
+    else:
+        edited = await asyncio.to_thread(parser.parse_edit, text, existing, settings.user_timezone)
     if edited.confidence == "low" or edited.start.tzinfo is None or edited.end.tzinfo is None:
         await telegram.send_message(chat_id, "I need a clearer change. For example: 'move IPPT on Saturday to 4pm'.")
         return
