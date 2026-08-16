@@ -54,3 +54,4 @@ def test_explicit_date_is_extracted_from_free_time_query():
         timezone = ZoneInfo("Asia/Singapore")
     # A real Settings instance is unnecessary: the parser only needs its timezone name.
     assert _date_from_text("when am i free on 19 august", Settings()).day == 19
+    assert _date_from_text("what are my plans on 19 aug", Settings()).day == 19

@@ -291,11 +291,20 @@ def _format_free_slots(events: list[CalendarEvent], settings: Settings, days: in
 
 
 def _date_from_text(text: str, settings: Settings):
-    match = re.search(r"\b(\d{1,2})\s+(january|february|march|april|may|june|july|august|september|october|november|december)\b", text)
+    match = re.search(
+        r"\b(\d{1,2})\s+(jan(?:uary)?|feb(?:ruary)?|mar(?:ch)?|apr(?:il)?|may|jun(?:e)?|jul(?:y)?|aug(?:ust)?|sep(?:t(?:ember)?)?|oct(?:ober)?|nov(?:ember)?|dec(?:ember)?)\b",
+        text,
+    )
     if not match:
         return None
     year = datetime.now(settings.timezone).year
-    return datetime.strptime(f"{match.group(1)} {match.group(2)} {year}", "%d %B %Y").date()
+    value = f"{match.group(1)} {match.group(2)} {year}"
+    for format_string in ("%d %B %Y", "%d %b %Y"):
+        try:
+            return datetime.strptime(value, format_string).date()
+        except ValueError:
+            continue
+    return None
 
 
 async def _ask_to_select(chat_id: int, action: str, request_text: str, events: list[CalendarEvent], match, telegram: TelegramClient) -> None:
