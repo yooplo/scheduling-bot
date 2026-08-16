@@ -7,17 +7,17 @@ from google.auth.transport.requests import Request
 from google.oauth2.credentials import Credentials
 from googleapiclient.discovery import build
 
-from .config import Settings
+from .config import CalendarAccount, Settings
 from .models import CalendarEvent, ParsedEdit, ParsedEvent
 
 CALENDAR_SCOPE = "https://www.googleapis.com/auth/calendar"
 
 
 class CalendarClient:
-    def __init__(self, settings: Settings) -> None:
+    def __init__(self, settings: Settings, account: CalendarAccount) -> None:
         credentials = Credentials(
             token=None,
-            refresh_token=settings.google_refresh_token,
+            refresh_token=account.google_refresh_token,
             token_uri="https://oauth2.googleapis.com/token",
             client_id=settings.google_client_id,
             client_secret=settings.google_client_secret,
@@ -25,7 +25,7 @@ class CalendarClient:
         )
         credentials.refresh(Request())
         self._service = build("calendar", "v3", credentials=credentials, cache_discovery=False)
-        self._calendar_id = settings.google_calendar_id
+        self._calendar_id = account.google_calendar_id
         self._timezone = settings.user_timezone
 
     def create_event(self, event: ParsedEvent) -> CalendarEvent:

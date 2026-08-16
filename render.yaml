@@ -14,7 +14,7 @@ services:
         sync: false
       - key: TELEGRAM_WEBHOOK_SECRET
         sync: false
-      - key: ALLOWED_TELEGRAM_USER_ID
+      - key: TELEGRAM_USER_1_ID
         sync: false
       - key: GROQ_API_KEY
         sync: false
@@ -24,9 +24,15 @@ services:
         sync: false
       - key: GOOGLE_CLIENT_SECRET
         sync: false
-      - key: GOOGLE_REFRESH_TOKEN
+      - key: GOOGLE_USER_1_REFRESH_TOKEN
         sync: false
-      - key: GOOGLE_CALENDAR_ID
+      - key: GOOGLE_USER_1_CALENDAR_ID
+        value: primary
+      - key: TELEGRAM_USER_2_ID
+        sync: false
+      - key: GOOGLE_USER_2_REFRESH_TOKEN
+        sync: false
+      - key: GOOGLE_USER_2_CALENDAR_ID
         value: primary
       - key: USER_TIMEZONE
         value: Asia/Singapore

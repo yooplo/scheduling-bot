@@ -39,18 +39,21 @@ class PendingAction:
 pending_actions: dict[int, PendingAction] = {}
 _settings: Settings | None = None
 _telegram: TelegramClient | None = None
-_calendar: CalendarClient | None = None
+_calendars: dict[int, CalendarClient] | None = None
 _parser: GroqParser | None = None
 
 
-def dependencies() -> tuple[Settings, TelegramClient, CalendarClient, GroqParser]:
-    global _settings, _telegram, _calendar, _parser
+def dependencies() -> tuple[Settings, TelegramClient, dict[int, CalendarClient], GroqParser]:
+    global _settings, _telegram, _calendars, _parser
     if _settings is None:
         _settings = get_settings()
         _telegram = TelegramClient(_settings.telegram_bot_token)
-        _calendar = CalendarClient(_settings)
+        _calendars = {
+            account.telegram_user_id: CalendarClient(_settings, account)
+            for account in _settings.calendar_accounts
+        }
         _parser = GroqParser(_settings.groq_api_key, _settings.groq_model)
-    return _settings, _telegram, _calendar, _parser
+    return _settings, _telegram, _calendars, _parser
 
 
 @app.get("/healthz")
@@ -61,7 +64,7 @@ async def healthz() -> dict[str, str]:
 @app.post("/webhook")
 async def webhook(request: Request, x_telegram_bot_api_secret_token: str | None = Header(default=None)) -> dict[str, bool]:
     try:
-        settings, telegram, calendar, parser = dependencies()
+        settings, telegram, calendars, parser = dependencies()
     except ConfigurationError:
         logger.exception("Invalid configuration")
         raise HTTPException(status_code=503, detail="Service is not configured")
@@ -69,10 +72,14 @@ async def webhook(request: Request, x_telegram_bot_api_secret_token: str | None 
         raise HTTPException(status_code=401, detail="Invalid webhook secret")
     update = await request.json()
     message = update.get("message") or {}
-    chat_id = message.get("chat", {}).get("id")
+    chat = message.get("chat", {})
+    chat_id = chat.get("id")
     sender_id = message.get("from", {}).get("id")
     text = (message.get("text") or "").strip()
-    if not chat_id or not text or sender_id != settings.allowed_telegram_user_id:
+    calendar = calendars.get(sender_id)
+    # Private chats prevent a permitted user from exposing their calendar to a
+    # group, and ensure each response stays with its paired Telegram account.
+    if not chat_id or chat.get("type") != "private" or not text or calendar is None:
         return {"ok": True}
     try:
         await handle_message(chat_id, text, settings, telegram, calendar, parser)
@@ -84,24 +91,26 @@ async def webhook(request: Request, x_telegram_bot_api_secret_token: str | None 
 
 @app.post("/scheduled/reminders")
 async def scheduled_reminders(authorization: str | None = Header(default=None)) -> Response:
-    settings, telegram, calendar, _ = dependencies()
+    settings, telegram, calendars, _ = dependencies()
     if authorization != f"Bearer {settings.scheduler_secret}":
         raise HTTPException(status_code=401, detail="Invalid scheduler secret")
-    events = await asyncio.to_thread(calendar.due_reminders)
-    for event in events:
-        await telegram.send_message(settings.allowed_telegram_user_id, f"⏰ Reminder: {event.title} starts at {_format_time(event.start)}")
-        await asyncio.to_thread(calendar.mark_reminder_sent, event.event_id)
+    for telegram_user_id, calendar in calendars.items():
+        events = await asyncio.to_thread(calendar.due_reminders)
+        for event in events:
+            await telegram.send_message(telegram_user_id, f"⏰ Reminder: {event.title} starts at {_format_time(event.start)}")
+            await asyncio.to_thread(calendar.mark_reminder_sent, event.event_id)
     return Response(status_code=204)
 
 
 @app.post("/scheduled/daily-agenda")
 async def scheduled_daily_agenda(authorization: str | None = Header(default=None)) -> Response:
-    settings, telegram, calendar, _ = dependencies()
+    settings, telegram, calendars, _ = dependencies()
     if authorization != f"Bearer {settings.scheduler_secret}":
         raise HTTPException(status_code=401, detail="Invalid scheduler secret")
-    events = await asyncio.to_thread(calendar.list_events, 1)
-    lines = [_format_event_listing(event, bullet=True) for event in events]
-    await telegram.send_message(settings.allowed_telegram_user_id, "☀️ Today's agenda:\n\n" + ("\n\n".join(lines) if lines else "No upcoming events today."))
+    for telegram_user_id, calendar in calendars.items():
+        events = await asyncio.to_thread(calendar.list_events, 1)
+        lines = [_format_event_listing(event, bullet=True) for event in events]
+        await telegram.send_message(telegram_user_id, "☀️ Today's agenda:\n\n" + ("\n\n".join(lines) if lines else "No upcoming events today."))
     return Response(status_code=204)
 
 

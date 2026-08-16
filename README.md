@@ -1,6 +1,6 @@
 # Telegram → Google Calendar bot
 
-A private, webhook-based FastAPI service that understands natural-language Telegram messages and creates, lists, or deletes events in one Google Calendar. It only accepts messages from the configured Telegram user ID.
+A private, webhook-based FastAPI service that understands natural-language Telegram messages and creates, lists, or deletes events in a fixed user's paired Google Calendar. It supports one or two preconfigured Telegram users; each is isolated to their own Google Calendar.
 
 Include a location naturally when creating an event, for example: `Dinner at La Pasta Saturday 7–9pm`. Locations are shown in upcoming lists when provided.
 
@@ -30,15 +30,15 @@ Free-time results cover the full day, from 12:00 AM through 11:59 PM, and show s
 
 ## Current limitations
 
-- One authorised Telegram user and one Google Calendar only.
+- One or two preconfigured Telegram users and calendars only. Adding users or allowing account changes requires a database and web OAuth flow.
 - No voice-message transcription, invitees/attendees, multiple calendars, or undo action.
 - Scheduler-based reminders and daily agenda require the cron-job.org setup below; confirm successful `204` job runs before relying on them.
 
 ## What you need before deployment
 
-1. **Telegram bot token and user ID**
+1. **Telegram bot token and user IDs**
    - In Telegram, open [@BotFather](https://t.me/BotFather), run `/newbot`, and save its API token as `TELEGRAM_BOT_TOKEN`.
-   - Message [@userinfobot](https://t.me/userinfobot) to obtain your numeric ID; use it as `ALLOWED_TELEGRAM_USER_ID`.
+   - Each permitted person messages [@userinfobot](https://t.me/userinfobot) to obtain their numeric ID. Store the first person's ID as `TELEGRAM_USER_1_ID` and, if using a second person, the other as `TELEGRAM_USER_2_ID`.
    - Generate `TELEGRAM_WEBHOOK_SECRET` locally with `python -c "import secrets; print(secrets.token_urlsafe(32))"`. Do not use the sample value from `.env.example`.
 
 2. **Groq key**
@@ -58,7 +58,9 @@ Free-time results cover the full day, from 12:00 AM through 11:59 PM, and show s
      python auth/get_refresh_token.py
      ```
 
-     A browser opens. Sign into the Google account whose calendar the bot should manage and grant the Calendar-only scope. Copy the three displayed values into your `.env`/Render secrets. Delete the downloaded JSON afterwards if you no longer need it; never commit it.
+     A browser opens. Sign into the first person's Google account and grant the Calendar-only scope. Copy the client ID, client secret, and `GOOGLE_USER_1_REFRESH_TOKEN` shown into your `.env`/Render secrets.
+
+     To connect the optional second fixed user, run the helper again in a new terminal after setting `GOOGLE_USER_SLOT=2`, sign into the second person's Google account, and save the resulting `GOOGLE_USER_2_REFRESH_TOKEN`. Both people use the same client ID and client secret. Delete the downloaded JSON afterwards if you no longer need it; never commit it.
 
 ## Run locally
 
@@ -90,7 +92,7 @@ Before `git add`, run `git status` and make sure `.env` and `client_secret.json`
 
 1. Create an account at [Render](https://render.com/) and connect GitHub.
 2. Click **New → Blueprint**, select this repository, and approve `render.yaml`.
-3. Generate a webhook secret locally with `python -c "import secrets; print(secrets.token_urlsafe(32))"`. Enter it, along with the other values marked `sync: false`: `TELEGRAM_BOT_TOKEN`, `ALLOWED_TELEGRAM_USER_ID`, `GROQ_API_KEY`, `GOOGLE_CLIENT_ID`, `GOOGLE_CLIENT_SECRET`, and `GOOGLE_REFRESH_TOKEN`. Keep the webhook secret available for the next step.
+3. Generate a webhook secret locally with `python -c "import secrets; print(secrets.token_urlsafe(32))"`. Enter it, along with the other values marked `sync: false`: `TELEGRAM_BOT_TOKEN`, `TELEGRAM_USER_1_ID`, `GOOGLE_USER_1_REFRESH_TOKEN`, `GROQ_API_KEY`, `GOOGLE_CLIENT_ID`, and `GOOGLE_CLIENT_SECRET`. For two people, also enter `TELEGRAM_USER_2_ID` and `GOOGLE_USER_2_REFRESH_TOKEN`. Keep the webhook secret available for the next step.
 4. Deploy. Once healthy, copy its URL, for example `https://telegram-calendar-bot.onrender.com`.
 5. Register the webhook from PowerShell. Replace all placeholders; do not paste the command into a shell history if it contains your token:
 
@@ -125,6 +127,8 @@ The cron-job.org reminder and daily-agenda jobs have been configured and verifie
 ## Security notes
 
 - The webhook validates Telegram's secret header before processing anything.
-- Messages from any Telegram user except `ALLOWED_TELEGRAM_USER_ID` are ignored.
-- The Google token uses only the Calendar scope.
+- Messages from any Telegram user not configured as `TELEGRAM_USER_1_ID` or `TELEGRAM_USER_2_ID` are ignored.
+- Each configured user is routed only to their paired Google refresh token and calendar; the bot never exposes one user's events to the other.
+- The bot processes configured users only in private Telegram chats, never groups.
+- Each Google token uses only the Calendar scope.
 - Rotate any credential immediately if it is ever committed or pasted into a ticket/chat.

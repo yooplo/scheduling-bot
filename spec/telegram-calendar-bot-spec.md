@@ -62,7 +62,7 @@ Telegram (user) → Telegram webhook → Web app (FastAPI) → Router
 - **Web framework**: FastAPI (async, plays well with webhook handlers)
 - **NLP parsing**: Groq API, prompted to return structured JSON
 - **Calendar**: Google Calendar API v3, OAuth 2.0 (installed-app flow, one-time),
-  refresh token stored as a secret/env var
+  with a separate refresh token stored as a secret/env var for each fixed user
 - **Hosting**: Render or Railway free web service, single process
 
 ## 4. File / Project Structure
@@ -94,7 +94,7 @@ calendar-bot/
 | Telegram Bot API | Receive/send messages | `TELEGRAM_BOT_TOKEN` |
 | Telegram webhook | Verify incoming requests are genuine | `TELEGRAM_WEBHOOK_SECRET` |
 | Groq API | Parse natural language into structured event data | `GROQ_API_KEY` |
-| Google Calendar API | Create/list/delete events | `GOOGLE_CLIENT_ID`, `GOOGLE_CLIENT_SECRET`, `GOOGLE_REFRESH_TOKEN` |
+| Google Calendar API | Create/list/delete events | Shared `GOOGLE_CLIENT_ID`, `GOOGLE_CLIENT_SECRET`; per-user `GOOGLE_USER_1_REFRESH_TOKEN` and optional `GOOGLE_USER_2_REFRESH_TOKEN` |
 
 All secrets are stored as environment variables on the host. `.env.example`
 documents every required variable with a placeholder value and a comment.
@@ -233,7 +233,7 @@ Groq only for field extraction** — cheaper and more predictable.
 ## 10. Timezone Handling
 
 - User's home timezone is a fixed config value (`USER_TIMEZONE` env var,
-  e.g. `Asia/Singapore`) since this is single-user
+  e.g. `Asia/Singapore`) shared by the one or two fixed users
 - All relative date/time phrases are resolved against this timezone
 - All events are created in Google Calendar with this timezone explicitly
   set (not UTC-naive)
@@ -241,9 +241,12 @@ Groq only for field extraction** — cheaper and more predictable.
 ## 11. Security Notes
 
 - Telegram webhook secret token validated on every request
-- Bot only responds to messages from the owner's Telegram user ID
-  (`ALLOWED_TELEGRAM_USER_ID` env var) — reject/ignore all others
-  silently or with a polite "not authorized" message
+- Bot only responds to configured Telegram user IDs (`TELEGRAM_USER_1_ID` and
+  optional `TELEGRAM_USER_2_ID`) — reject/ignore all others silently
+- Every configured Telegram ID maps to exactly one Google refresh token and
+  calendar. Requests, reminders, and agendas use only that user's calendar.
+- Webhook messages are processed only from private chats, preventing calendar
+  responses from being exposed to Telegram groups.
 - No secrets committed to source control; `.env` gitignored
 - Google refresh token has calendar scope only
   (`https://www.googleapis.com/auth/calendar`), not broader Google
