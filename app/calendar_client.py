@@ -68,10 +68,10 @@ class CalendarClient:
 
     def due_reminders(self) -> list[CalendarEvent]:
         now = datetime.now(timezone.utc)
-        result = self._service.events().list(calendarId=self._calendar_id, timeMin=now.isoformat(), timeMax=(now + timedelta(days=8)).isoformat(), singleEvents=True, orderBy="startTime", privateExtendedProperty="telegram_reminder_minutes").execute()
         due = []
-        for item in result.get("items", []):
-            event = _to_event(item, self._timezone)
+        # Use the same Calendar query proven by normal list requests. Some
+        # Calendar configurations reject the privateExtendedProperty filter.
+        for event in self.list_events(8):
             if event.reminder_minutes and not event.reminder_sent and event.start - timedelta(minutes=event.reminder_minutes) <= now < event.start:
                 due.append(event)
         return due
