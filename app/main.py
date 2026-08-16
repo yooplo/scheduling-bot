@@ -199,6 +199,7 @@ async def handle_message(chat_id: int, text: str, settings: Settings, telegram: 
         now = datetime.now(settings.timezone)
         event = await asyncio.to_thread(parser.parse_event, text, now, settings.user_timezone)
         event.reminder_minutes = event.reminder_minutes or _reminder_minutes_from_text(text)
+        _apply_recurrence_from_text(event, text)
         if event.confidence == "low":
             await telegram.send_message(chat_id, "I need a clearer date and time. For example: 'dentist tomorrow 2–3pm'.")
             return
@@ -215,7 +216,8 @@ async def handle_message(chat_id: int, text: str, settings: Settings, telegram: 
         if event.reminder_minutes:
             unit = "minute" if event.reminder_minutes == 1 else "minutes"
             reminder_confirmation = f"\n⏰ Reminder set: {event.reminder_minutes} {unit} before"
-        await telegram.send_message(chat_id, f"✅ Added: {created.title} — {_format_time(created.start)}–{_format_time(created.end)}{reminder_confirmation}")
+        recurrence_confirmation = "\n🔁 Repeats weekly" if event.recurrence else ""
+        await telegram.send_message(chat_id, f"✅ Added: {created.title} — {_format_time(created.start)}–{_format_time(created.end)}{recurrence_confirmation}{reminder_confirmation}")
 
 
 async def _delete_event(chat_id: int, event: CalendarEvent, telegram: TelegramClient, calendar: CalendarClient) -> None:
@@ -336,6 +338,20 @@ def _reminder_minutes_from_text(text: str) -> int | None:
         multiplier = 1440 if match.group(2).startswith("day") else 60 if match.group(2).startswith("hour") else 1
         return words[match.group(1)] * multiplier
     return None
+
+
+def _apply_recurrence_from_text(event, text: str) -> None:
+    """Ensure common weekly recurrence wording never relies on optional LLM output."""
+    match = re.search(r"\bevery\s+(monday|tuesday|wednesday|thursday|friday|saturday|sunday)\b", text.lower())
+    if not match:
+        return
+    weekdays = {"monday": (0, "MO"), "tuesday": (1, "TU"), "wednesday": (2, "WE"), "thursday": (3, "TH"), "friday": (4, "FR"), "saturday": (5, "SA"), "sunday": (6, "SU")}
+    target_day, rrule_day = weekdays[match.group(1)]
+    offset = (target_day - event.start.weekday()) % 7
+    if offset:
+        event.start += timedelta(days=offset)
+        event.end += timedelta(days=offset)
+    event.recurrence = f"RRULE:FREQ=WEEKLY;BYDAY={rrule_day}"
 
 
 def _format_clock(value: datetime) -> str:
