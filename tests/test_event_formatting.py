@@ -1,6 +1,6 @@
 from datetime import datetime
 
-from app.main import _apply_recurrence_from_text, _format_event_listing, _format_event_range, _reminder_minutes_from_text
+from app.main import _apply_recurrence_from_text, _format_event_listing, _format_event_range, _format_update_confirmation, _reminder_minutes_from_text
 from app.models import ParsedEvent
 from app.models import CalendarEvent
 
@@ -41,3 +41,8 @@ def test_weekly_recurrence_moves_event_to_named_weekday():
     _apply_recurrence_from_text(event, "gym every monday at 8pm")
     assert event.start.weekday() == 0
     assert event.recurrence == "RRULE:FREQ=WEEKLY;BYDAY=MO"
+
+
+def test_update_confirmation_includes_location():
+    event = CalendarEvent(event_id="1", title="Carousel", location="Amelia's house", start=datetime.fromisoformat("2026-08-17T14:00:00+08:00"), end=datetime.fromisoformat("2026-08-17T15:00:00+08:00"))
+    assert "📍 Amelia's house" in _format_update_confirmation(event)

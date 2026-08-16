@@ -238,7 +238,7 @@ async def _edit_event(chat_id: int, text: str, existing: CalendarEvent, settings
         await telegram.send_message(chat_id, "I need a clearer change. For example: 'move IPPT on Saturday to 4pm'.")
         return
     updated = await asyncio.to_thread(calendar.update_event, existing.event_id, edited)
-    await telegram.send_message(chat_id, f"✅ Updated: {updated.title} — {_format_time(updated.start)}–{_format_time(updated.end)}")
+    await telegram.send_message(chat_id, _format_update_confirmation(updated))
 
 
 async def _set_reminder(chat_id: int, text: str, event: CalendarEvent, settings: Settings, telegram: TelegramClient, calendar: CalendarClient, parser: GroqParser) -> None:
@@ -320,6 +320,13 @@ def _format_event_listing(event: CalendarEvent, index: int | None = None, bullet
     lines = [f"{prefix} {event.title}", f"   {_format_event_range(event)}"]
     if event.location:
         lines.append(f"   📍 {event.location}")
+    return "\n".join(lines)
+
+
+def _format_update_confirmation(event: CalendarEvent) -> str:
+    lines = [f"✅ Updated: {event.title}", f"📅 {_format_event_range(event)}"]
+    if event.location:
+        lines.append(f"📍 {event.location}")
     return "\n".join(lines)
 
 
