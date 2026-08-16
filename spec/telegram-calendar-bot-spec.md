@@ -167,6 +167,8 @@ language and routed by intent:
 | "Gym every Monday at 8pm" | add weekly recurring event |
 | "disable reminder for IPPT" | remove reminder |
 | "what's on my calendar this week" / "list upcoming" | list |
+| "what are my plans on 19 Aug" | list events for that specific day |
+| `/start` | personalised welcome message with usage examples |
 | Reply to a pending disambiguation ("2" or "the second one") | resolve pending delete |
 
 Intent detection can be a single Groq call that returns `action` as
