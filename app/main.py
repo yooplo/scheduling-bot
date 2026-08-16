@@ -21,8 +21,8 @@ app = FastAPI(title="Telegram Calendar Bot")
 
 DELETE_WORDS = ("delete", "cancel", "remove")
 EDIT_WORDS = ("change", "edit", "move", "reschedule", "update")
-REMINDER_PREFIXES = ("set a reminder", "remind me")
-REMINDER_LIST_PHRASES = ("upcoming reminders", "all reminders", "show reminders", "my reminders")
+REMINDER_PREFIXES = ("set a reminder", "add a reminder", "remind me")
+REMINDER_LIST_PHRASES = ("reminders", "upcoming reminders", "all reminders", "show reminders", "my reminders")
 LIST_WORDS = ("list", "show", "what's on", "whats on", "what are my", "upcoming", "calendar", "plans", "schedule")
 PENDING_TTL_SECONDS = 300
 
