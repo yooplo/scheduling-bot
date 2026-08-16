@@ -1,7 +1,7 @@
 from datetime import datetime
 from zoneinfo import ZoneInfo
 
-from app.main import _apply_recurrence_from_text, _date_from_text, _format_event_listing, _format_event_range, _format_update_confirmation, _reminder_minutes_from_text
+from app.main import _apply_recurrence_from_text, _date_from_text, _format_event_listing, _format_event_range, _format_update_confirmation, _reminder_minutes_from_text, _welcome_message
 from app.models import ParsedEvent
 from app.models import CalendarEvent
 
@@ -55,3 +55,7 @@ def test_explicit_date_is_extracted_from_free_time_query():
     # A real Settings instance is unnecessary: the parser only needs its timezone name.
     assert _date_from_text("when am i free on 19 august", Settings()).day == 19
     assert _date_from_text("what are my plans on 19 aug", Settings()).day == 19
+
+
+def test_welcome_message_uses_telegram_first_name():
+    assert _welcome_message("Justin").startswith("Hi Justin! 👋")

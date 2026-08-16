@@ -75,6 +75,7 @@ async def webhook(request: Request, x_telegram_bot_api_secret_token: str | None 
     chat = message.get("chat", {})
     chat_id = chat.get("id")
     sender_id = message.get("from", {}).get("id")
+    first_name = (message.get("from", {}).get("first_name") or "").strip()
     text = (message.get("text") or "").strip()
     calendar = calendars.get(sender_id)
     # Private chats prevent a permitted user from exposing their calendar to a
@@ -82,6 +83,9 @@ async def webhook(request: Request, x_telegram_bot_api_secret_token: str | None 
     if not chat_id or chat.get("type") != "private" or not text or calendar is None:
         return {"ok": True}
     try:
+        if re.match(r"^/start(?:@\w+)?(?:\s|$)", text, flags=re.IGNORECASE):
+            await telegram.send_message(chat_id, _welcome_message(first_name))
+            return {"ok": True}
         await handle_message(chat_id, text, settings, telegram, calendar, parser)
     except Exception:
         logger.exception("Failed handling Telegram message chat_id=%s", chat_id)
@@ -338,6 +342,19 @@ def _format_time(value: datetime | None) -> str:
         return "time unavailable"
     hour = value.hour % 12 or 12
     return f"{value:%a} {value.day} {value:%b} {hour}:{value:%M} {value:%p}"
+
+
+def _welcome_message(first_name: str) -> str:
+    name = first_name or "there"
+    return (
+        f"Hi {name}! 👋 Welcome to SchedulingBot.\n\n"
+        "I can manage your personal Google Calendar. Try:\n"
+        "• Dinner tomorrow 7–9pm at La Pasta\n"
+        "• What are my plans on 19 Aug?\n"
+        "• When am I free tomorrow?\n"
+        "• Remind me 30 minutes before IPPT\n\n"
+        "Send ‘list’ to see upcoming events."
+    )
 
 
 def _format_event_range(event: CalendarEvent) -> str:
