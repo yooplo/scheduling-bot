@@ -80,7 +80,10 @@ async def webhook(request: Request, x_telegram_bot_api_secret_token: str | None 
     calendar = calendars.get(sender_id)
     # Private chats prevent a permitted user from exposing their calendar to a
     # group, and ensure each response stays with its paired Telegram account.
-    if not chat_id or chat.get("type") != "private" or not text or calendar is None:
+    if not chat_id or chat.get("type") != "private" or not text:
+        return {"ok": True}
+    if calendar is None:
+        await telegram.send_message(chat_id, _unauthorised_message())
         return {"ok": True}
     try:
         if re.match(r"^/start(?:@\w+)?(?:\s|$)", text, flags=re.IGNORECASE):
@@ -394,6 +397,10 @@ def _welcome_message(first_name: str) -> str:
         "• Remind me 30 minutes before IPPT\n\n"
         "Send ‘list’ to see upcoming events."
     )
+
+
+def _unauthorised_message() -> str:
+    return "Sorry, you do not have permission to use this bot. Please contact @juzteeeen for access."
 
 
 def _format_event_range(event: CalendarEvent) -> str:
