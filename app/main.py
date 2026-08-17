@@ -223,7 +223,7 @@ async def handle_message(chat_id: int, text: str, settings: Settings, telegram: 
             await _edit_event(chat_id, text, selected, settings, telegram, calendar, parser)
             return
         await _ask_to_select(chat_id, "edit", text, events, match, telegram)
-    elif any(word in lowered for word in LIST_WORDS):
+    elif any(word in lowered for word in LIST_WORDS) and not _is_explicit_add_request(lowered):
         explicit_day = _date_from_text(lowered, settings)
         weekday = _upcoming_weekday_from_text(lowered, settings)
         if "tomorrow" in lowered or "tmr" in lowered or explicit_day or weekday:
@@ -328,6 +328,10 @@ def _is_standalone_reminder_request(text: str) -> bool:
 
 def _is_calendar_list_request(text: str) -> bool:
     return any(phrase in text for phrase in ("calendar types", "list calendars", "show calendars", "my calendars", "what calendars"))
+
+
+def _is_explicit_add_request(text: str) -> bool:
+    return bool(re.match(r"^(?:add|create|put)\b", text))
 
 
 def _is_series_edit(text: str, event: CalendarEvent) -> bool:
