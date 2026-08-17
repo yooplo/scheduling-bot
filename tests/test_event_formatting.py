@@ -1,7 +1,7 @@
 from datetime import datetime
 from zoneinfo import ZoneInfo
 
-from app.main import LIST_WORDS, _apply_recurrence_from_text, _date_from_text, _format_event_listing, _format_event_range, _format_update_confirmation, _reminder_minutes_from_text, _welcome_message
+from app.main import LIST_WORDS, _apply_recurrence_from_text, _date_from_text, _format_event_listing, _format_event_range, _format_update_confirmation, _is_series_edit, _reminder_minutes_from_text, _welcome_message
 from app.models import ParsedEvent
 from app.models import CalendarEvent
 
@@ -63,3 +63,13 @@ def test_welcome_message_uses_telegram_first_name():
 
 def test_singular_plan_is_a_list_intent():
     assert "plan" in LIST_WORDS
+
+
+def test_explicit_series_wording_edits_recurring_series_only():
+    recurring = CalendarEvent(
+        event_id="occurrence", recurring_event_id="series", title="Gym",
+        start=datetime.fromisoformat("2026-08-17T20:00:00+08:00"),
+        end=datetime.fromisoformat("2026-08-17T21:00:00+08:00"),
+    )
+    assert _is_series_edit("change the weekly gym series to Tuesday at 7pm", recurring)
+    assert not _is_series_edit("move gym to 7pm", recurring)

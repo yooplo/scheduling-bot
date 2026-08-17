@@ -263,6 +263,11 @@ async def _edit_event(chat_id: int, text: str, existing: CalendarEvent, settings
     if edited.confidence == "low" or edited.start.tzinfo is None or edited.end.tzinfo is None:
         await telegram.send_message(chat_id, "I need a clearer change. For example: 'move IPPT on Saturday to 4pm'.")
         return
+    if _is_series_edit(text, existing):
+        _apply_recurrence_from_text(edited, text)
+        updated = await asyncio.to_thread(calendar.update_series, existing, edited)
+        await telegram.send_message(chat_id, _format_series_update_confirmation(updated, edited.recurrence))
+        return
     updated = await asyncio.to_thread(calendar.update_event, existing.event_id, edited)
     await telegram.send_message(chat_id, _format_update_confirmation(updated))
 
@@ -281,6 +286,17 @@ def _is_existing_reminder_request(text: str) -> bool:
     if text.startswith(REMINDER_PREFIXES):
         return True
     return "reminder" in text and any(word in text for word in EDIT_WORDS)
+
+
+def _is_series_edit(text: str, event: CalendarEvent) -> bool:
+    """Require explicit series wording so ordinary edits affect one occurrence."""
+    if not event.recurring_event_id:
+        return False
+    lowered = text.lower()
+    return (
+        any(phrase in lowered for phrase in ("series", "recurring", "weekly", "every "))
+        or ("all" in lowered and any(word in lowered for word in ("session", "sessions", "occurrence", "occurrences")))
+    )
 
 
 def _format_free_slots(events: list[CalendarEvent], settings: Settings, days: int, start_day=None) -> str:
@@ -384,6 +400,15 @@ def _format_update_confirmation(event: CalendarEvent) -> str:
     lines = [f"✅ Updated: {event.title}", f"📅 {_format_event_range(event)}"]
     if event.location:
         lines.append(f"📍 {event.location}")
+    return "\n".join(lines)
+
+
+def _format_series_update_confirmation(event: CalendarEvent, recurrence: str | None) -> str:
+    lines = [f"✅ Updated recurring series: {event.title}", f"📅 {_format_event_range(event)}"]
+    if event.location:
+        lines.append(f"📍 {event.location}")
+    if recurrence:
+        lines.append("🔁 Recurrence rule updated")
     return "\n".join(lines)
 
 

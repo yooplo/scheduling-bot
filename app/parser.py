@@ -29,7 +29,7 @@ User message: {message}"""
 
     def match_event(self, message: str, candidates: list[CalendarEvent]) -> DeleteMatch:
         options = [{"event_id": e.event_id, "title": e.title, "start": e.start.isoformat()} for e in candidates]
-        prompt = f"""Match the user's deletion request to one of the supplied calendar events. Return JSON only.
+        prompt = f"""Match the user's request to one of the supplied calendar events. Return JSON only.
 Never invent an event ID. If uncertain or more than one is plausible, set ambiguous true, matched_event_id null, and provide plausible candidates.
 Schema: {{\"action\":\"delete\",\"matched_event_id\":string|null,\"matched_title\":string|null,\"ambiguous\":boolean,\"candidates\":[{{\"event_id\":string,\"title\":string,\"start\":ISO8601}}]}}
 User request: {message}
@@ -52,8 +52,9 @@ Events: {json.dumps(options)}"""
         prompt = f"""Apply the user's requested change to the existing calendar event. Return JSON only.
 Timezone: {timezone_name}. Preserve every existing field that the user does not explicitly change.
 If the user specifies only a new start time, preserve the original duration. All datetime values must include an offset.
+If the user explicitly changes a recurring-series rule, return a valid RFC5545 RRULE such as `RRULE:FREQ=WEEKLY;BYDAY=TU`; otherwise return null.
 Use low confidence if the requested change is ambiguous or incomplete.
-Schema: {{\"action\":\"edit\",\"title\":string,\"start\":ISO8601,\"end\":ISO8601,\"location\":string|null,\"confidence\":\"high\"|\"low\"}}
+Schema: {{\"action\":\"edit\",\"title\":string,\"start\":ISO8601,\"end\":ISO8601,\"location\":string|null,\"confidence\":\"high\"|\"low\",\"recurrence\":string|null}}
 Existing event: {json.dumps(current)}
 User request: {message}"""
         return self._request_model(prompt, ParsedEdit)

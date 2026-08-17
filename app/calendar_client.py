@@ -113,6 +113,23 @@ class CalendarClient:
         ).execute()
         return _to_event(item, self._timezone)
 
+    def update_series(self, event: CalendarEvent, edited: ParsedEdit) -> CalendarEvent:
+        """Patch a recurring-event master so the change applies to every occurrence."""
+        series_id = event.recurring_event_id or event.event_id
+        body = {
+            "summary": edited.title,
+            "start": {"dateTime": edited.start.isoformat(), "timeZone": self._timezone},
+            "end": {"dateTime": edited.end.isoformat(), "timeZone": self._timezone},
+            "location": edited.location or "",
+        }
+        # Omit recurrence to preserve the current rule; supply it to replace it.
+        if edited.recurrence:
+            body["recurrence"] = [edited.recurrence]
+        item = self._service.events().patch(
+            calendarId=self._calendar_id, eventId=series_id, body=body
+        ).execute()
+        return _to_event(item, self._timezone)
+
 
 def _to_event(item: dict, timezone_name: str = "UTC") -> CalendarEvent:
     start = item.get("start", {}).get("dateTime") or item.get("start", {}).get("date")

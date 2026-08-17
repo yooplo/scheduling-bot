@@ -165,6 +165,7 @@ language and routed by intent:
 | "reminders" / "show upcoming reminders" | list reminders |
 | "when am I free tmr?" | find free time |
 | "Gym every Monday at 8pm" | add weekly recurring event |
+| "change the weekly gym series to Tuesdays at 7pm" | edit every occurrence and its recurrence rule |
 | "disable reminder for IPPT" | remove reminder |
 | "what's on my calendar this week" / "list upcoming" | list |
 | "what are my plans on 19 Aug" | list events for that specific day |

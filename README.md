@@ -20,6 +20,7 @@ All requests use `USER_TIMEZONE` (normally `Asia/Singapore`).
 | List today/tomorrow | `plans tmr`, `what are my plans tomorrow?`, or `show my schedule today` |
 | Find availability | `when am I free tmr?` or `find free time this week` |
 | Edit an event | `move IPPT to 4pm` or `update carousel JOOLA to be at Amelia's house` |
+| Edit a whole recurring series | `change the weekly gym series to Tuesdays at 7pm` or `update all gym sessions to be at Studio A` |
 | Delete one event | `remove dentist tomorrow` |
 | Delete a recurring series | `remove the weekly Monday gym sessions` |
 | Set/change a reminder | `set a reminder one day before IPPT` or `change the reminder for supper to 8:50pm` |

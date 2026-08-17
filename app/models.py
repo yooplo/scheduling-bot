@@ -18,13 +18,14 @@ class ParsedEvent(BaseModel):
 
 
 class ParsedEdit(BaseModel):
-    """A complete replacement representation of an existing event."""
+    """A complete replacement representation of an existing event or series."""
     action: Literal["edit"] = "edit"
     title: str = Field(min_length=1, max_length=300)
     start: datetime
     end: datetime
     location: str | None = Field(default=None, max_length=500)
     confidence: Literal["high", "low"]
+    recurrence: str | None = None
 
 
 class ParsedReminder(BaseModel):
