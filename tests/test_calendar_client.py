@@ -89,3 +89,4 @@ def test_list_calendars_reads_names_colours_and_default_calendar():
 
     assert [(calendar.name, calendar.background_color) for calendar in calendars] == [("My calendar", "#4285f4"), ("Work", "#a4bdfc")]
     assert client.resolve_calendar("work").calendar_id == "work-id"
+    assert client.resolve_calendar("Work calendar").calendar_id == "work-id"

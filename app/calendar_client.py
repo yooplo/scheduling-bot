@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+import re
 from datetime import date, datetime, time, timedelta, timezone
 from zoneinfo import ZoneInfo
 
@@ -63,7 +64,7 @@ class CalendarClient:
     def resolve_calendar(self, name: str | None) -> CalendarInfo | None:
         if not name:
             return None
-        normalized = name.strip().casefold()
+        normalized = re.sub(r"\s+calendar\s*$", "", name.strip(), flags=re.IGNORECASE).casefold()
         calendars = self.list_calendars()
         exact = [calendar for calendar in calendars if calendar.name.casefold() == normalized]
         if len(exact) == 1:
