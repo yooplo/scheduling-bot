@@ -1,7 +1,7 @@
 from datetime import datetime
 
-from app.calendar_client import CalendarClient, _to_event
-from app.models import CalendarEvent, ParsedEdit
+from app.calendar_client import CalendarClient, _serialize_reminders, _to_event
+from app.models import CalendarEvent, ParsedEdit, ReminderSpec
 
 
 def test_google_event_is_converted():
@@ -54,3 +54,15 @@ def test_update_series_patches_the_recurring_event_master():
 
     assert captured["eventId"] == "series-master"
     assert captured["body"]["recurrence"] == ["RRULE:FREQ=WEEKLY;BYDAY=TU"]
+
+
+def test_calendar_event_reads_multiple_private_telegram_reminders():
+    reminders = [ReminderSpec(reminder_id="first", minutes_before=60, message="Bring ID"), ReminderSpec(reminder_id="second", minutes_before=15)]
+    event = _to_event({
+        "id": "abc", "summary": "Dentist",
+        "start": {"dateTime": "2026-08-18T10:00:00+08:00"},
+        "end": {"dateTime": "2026-08-18T11:00:00+08:00"},
+        "extendedProperties": {"private": {"telegram_reminders": _serialize_reminders(reminders)}},
+    })
+    assert [reminder.minutes_before for reminder in event.reminders] == [60, 15]
+    assert event.reminders[0].message == "Bring ID"

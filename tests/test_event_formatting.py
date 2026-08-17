@@ -1,7 +1,7 @@
 from datetime import datetime
 from zoneinfo import ZoneInfo
 
-from app.main import LIST_WORDS, _apply_recurrence_from_text, _date_from_text, _format_event_listing, _format_event_range, _format_update_confirmation, _is_series_edit, _reminder_minutes_from_text, _welcome_message
+from app.main import LIST_WORDS, _apply_recurrence_from_text, _date_from_text, _format_event_listing, _format_event_range, _format_update_confirmation, _is_series_edit, _reminder_message_from_text, _reminder_minutes_from_text, _reminders_from_text, _welcome_message
 from app.models import ParsedEvent
 from app.models import CalendarEvent
 
@@ -73,3 +73,9 @@ def test_explicit_series_wording_edits_recurring_series_only():
     )
     assert _is_series_edit("change the weekly gym series to Tuesday at 7pm", recurring)
     assert not _is_series_edit("move gym to 7pm", recurring)
+
+
+def test_reminder_text_supports_multiple_custom_reminders():
+    reminders = _reminders_from_text("dentist tomorrow, remind me 1 hour before to bring ID and 15 minutes before")
+    assert [reminder.minutes_before for reminder in reminders] == [60, 15]
+    assert _reminder_message_from_text("remind me 1 hour before to bring ID") == "bring ID"

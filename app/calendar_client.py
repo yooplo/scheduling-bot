@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import json
 from datetime import date, datetime, time, timedelta, timezone
 from zoneinfo import ZoneInfo
 
@@ -8,7 +9,7 @@ from google.oauth2.credentials import Credentials
 from googleapiclient.discovery import build
 
 from .config import CalendarAccount, Settings
-from .models import CalendarEvent, ParsedEdit, ParsedEvent
+from .models import CalendarEvent, ParsedEdit, ParsedEvent, ReminderSpec, ScheduledReminder
 
 CALENDAR_SCOPE = "https://www.googleapis.com/auth/calendar"
 
@@ -36,8 +37,9 @@ class CalendarClient:
         }
         if event.location:
             body["location"] = event.location
-        if event.reminder_minutes:
-            body["extendedProperties"] = {"private": {"telegram_reminder_minutes": str(event.reminder_minutes)}}
+        reminders = event.reminders or ([ReminderSpec(minutes_before=event.reminder_minutes)] if event.reminder_minutes else [])
+        if reminders:
+            body["extendedProperties"] = {"private": {"telegram_reminders": _serialize_reminders(reminders)}}
         if event.recurrence:
             body["recurrence"] = [event.recurrence]
         item = self._service.events().insert(calendarId=self._calendar_id, body=body).execute()
@@ -52,7 +54,7 @@ class CalendarClient:
         start = datetime.combine(day, time.min, tzinfo=local_timezone)
         return self._list_events_between(start, start + timedelta(days=1))
 
-    def _list_events_between(self, start: datetime, end: datetime) -> list[CalendarEvent]:
+    def _list_events_between(self, start: datetime, end: datetime, include_internal: bool = False) -> list[CalendarEvent]:
         result = self._service.events().list(
             calendarId=self._calendar_id,
             timeMin=start.isoformat(),
@@ -63,7 +65,7 @@ class CalendarClient:
         events = [_to_event(item, self._timezone) for item in result.get("items", []) if item.get("status") != "cancelled"]
         # Google may include events that began before timeMin but overlap it. Do
         # not show an event once its end time has passed.
-        return [event for event in events if event.end is None or event.end > start]
+        return [event for event in events if (include_internal or not event.is_standalone_reminder) and (event.end is None or event.end > start)]
 
     def delete_event(self, event_id: str) -> None:
         self._service.events().delete(calendarId=self._calendar_id, eventId=event_id).execute()
@@ -71,32 +73,51 @@ class CalendarClient:
     def delete_series(self, event: CalendarEvent) -> None:
         self.delete_event(event.recurring_event_id or event.event_id)
 
-    def due_reminders(self) -> list[CalendarEvent]:
+    def list_reminders(self, days_ahead: int = 30) -> list[ScheduledReminder]:
         now = datetime.now(timezone.utc)
-        due = []
-        # Use the same Calendar query proven by normal list requests. Some
-        # Calendar configurations reject the privateExtendedProperty filter.
-        for event in self.list_events(8):
-            if event.reminder_minutes and not event.reminder_sent and event.start - timedelta(minutes=event.reminder_minutes) <= now < event.start:
-                due.append(event)
-        return due
+        reminders: list[ScheduledReminder] = []
+        for event in self._list_events_between(now - timedelta(days=8), now + timedelta(days=days_ahead), include_internal=True):
+            for reminder in event.reminders:
+                if reminder.sent:
+                    continue
+                due_at = event.start if event.is_standalone_reminder else event.start - timedelta(minutes=reminder.minutes_before or 0)
+                reminders.append(ScheduledReminder(event_id=event.event_id, reminder=reminder, due_at=due_at, event_title=None if event.is_standalone_reminder else event.title, standalone=event.is_standalone_reminder))
+        return sorted(reminders, key=lambda reminder: reminder.due_at)
 
-    def mark_reminder_sent(self, event_id: str) -> None:
+    def list_standalone_reminder_events(self, days_ahead: int = 30) -> list[CalendarEvent]:
+        now = datetime.now(timezone.utc)
+        return [event for event in self._list_events_between(now, now + timedelta(days=days_ahead), include_internal=True) if event.is_standalone_reminder]
+
+    def due_reminders(self) -> list[ScheduledReminder]:
+        now = datetime.now(timezone.utc)
+        return [reminder for reminder in self.list_reminders(8) if reminder.due_at <= now]
+
+    def mark_reminder_sent(self, event_id: str, reminder_id: str) -> None:
         item = self._service.events().get(calendarId=self._calendar_id, eventId=event_id).execute()
         private = item.get("extendedProperties", {}).get("private", {})
-        private["telegram_reminder_sent"] = "true"
+        reminders = _reminders_from_properties(private)
+        for reminder in reminders:
+            if reminder.reminder_id == reminder_id:
+                reminder.sent = True
+        private["telegram_reminders"] = _serialize_reminders(reminders)
+        private.pop("telegram_reminder_minutes", None)
+        private.pop("telegram_reminder_sent", None)
         self._service.events().patch(calendarId=self._calendar_id, eventId=event_id, body={"extendedProperties": {"private": private}}).execute()
 
-    def set_reminder(self, event_id: str, reminder_minutes: int) -> None:
+    def set_reminder(self, event_id: str, reminder_minutes: int, message: str | None = None, append: bool = False) -> None:
         item = self._service.events().get(calendarId=self._calendar_id, eventId=event_id).execute()
         private = item.get("extendedProperties", {}).get("private", {})
-        private["telegram_reminder_minutes"] = str(reminder_minutes)
+        reminders = _reminders_from_properties(private) if append else []
+        reminders.append(ReminderSpec(minutes_before=reminder_minutes, message=message))
+        private["telegram_reminders"] = _serialize_reminders(reminders)
+        private.pop("telegram_reminder_minutes", None)
         private.pop("telegram_reminder_sent", None)
         self._service.events().patch(calendarId=self._calendar_id, eventId=event_id, body={"extendedProperties": {"private": private}}).execute()
 
     def clear_reminder(self, event_id: str) -> None:
         item = self._service.events().get(calendarId=self._calendar_id, eventId=event_id).execute()
         private = item.get("extendedProperties", {}).get("private", {})
+        private.pop("telegram_reminders", None)
         private.pop("telegram_reminder_minutes", None)
         private.pop("telegram_reminder_sent", None)
         self._service.events().patch(calendarId=self._calendar_id, eventId=event_id, body={"extendedProperties": {"private": private}}).execute()
@@ -111,6 +132,19 @@ class CalendarClient:
         item = self._service.events().patch(
             calendarId=self._calendar_id, eventId=event_id, body=body
         ).execute()
+        return _to_event(item, self._timezone)
+
+    def create_standalone_reminder(self, message: str, due_at: datetime) -> CalendarEvent:
+        reminder = ReminderSpec(message=message)
+        body = {
+            "summary": "Telegram reminder",
+            "start": {"dateTime": due_at.isoformat(), "timeZone": self._timezone},
+            "end": {"dateTime": (due_at + timedelta(minutes=1)).isoformat(), "timeZone": self._timezone},
+            "transparency": "transparent",
+            "visibility": "private",
+            "extendedProperties": {"private": {"telegram_reminder_type": "standalone", "telegram_reminders": _serialize_reminders([reminder])}},
+        }
+        item = self._service.events().insert(calendarId=self._calendar_id, body=body).execute()
         return _to_event(item, self._timezone)
 
     def update_series(self, event: CalendarEvent, edited: ParsedEdit) -> CalendarEvent:
@@ -142,13 +176,35 @@ def _to_event(item: dict, timezone_name: str = "UTC") -> CalendarEvent:
         return parsed if parsed.tzinfo else parsed.replace(tzinfo=calendar_timezone)
 
     properties = item.get("extendedProperties", {}).get("private", {})
+    reminders = _reminders_from_properties(properties)
     reminder = properties.get("telegram_reminder_minutes")
+    is_standalone = properties.get("telegram_reminder_type") == "standalone"
+    title = reminders[0].message if is_standalone and reminders and reminders[0].message else item.get("summary") or "(untitled)"
     return CalendarEvent(
-        event_id=item["id"], title=item.get("summary") or "(untitled)",
+        event_id=item["id"], title=title,
         start=parse(start),
         end=parse(end),
         location=item.get("location"),
         reminder_minutes=int(reminder) if reminder and reminder.isdigit() else None,
         reminder_sent=properties.get("telegram_reminder_sent") == "true",
+        reminders=reminders,
+        is_standalone_reminder=is_standalone,
         recurring_event_id=item.get("recurringEventId"),
     )
+
+
+def _reminders_from_properties(properties: dict) -> list[ReminderSpec]:
+    raw = properties.get("telegram_reminders")
+    if raw:
+        try:
+            return [ReminderSpec.model_validate(value) for value in json.loads(raw)]
+        except (TypeError, ValueError, json.JSONDecodeError):
+            return []
+    minutes = properties.get("telegram_reminder_minutes")
+    if minutes and minutes.isdigit():
+        return [ReminderSpec(reminder_id="legacy", minutes_before=int(minutes), sent=properties.get("telegram_reminder_sent") == "true")]
+    return []
+
+
+def _serialize_reminders(reminders: list[ReminderSpec]) -> str:
+    return json.dumps([reminder.model_dump() for reminder in reminders], separators=(",", ":"))

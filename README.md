@@ -12,7 +12,8 @@ All requests use `USER_TIMEZONE` (normally `Asia/Singapore`).
 |---|---|
 | Add an event | `Dentist tomorrow 2–3pm` |
 | Add a location | `Dinner at La Pasta Saturday 7–9pm` |
-| Add a reminder | `Supper tonight at 9pm, remind me 20 minutes before` |
+| Add custom or multiple event reminders | `Dentist tomorrow 2pm, remind me 1 hour before to bring ID and 15 minutes before` |
+| Add an independent reminder | `remind me to pay the bill tomorrow at 9am` |
 | Add a recurring event | `Gym every Monday at 8pm` |
 | Start the bot | `/start` — receives a personalised welcome and examples |
 | List the next 7 days | `list`, `upcoming`, or `schedule` |
@@ -24,6 +25,7 @@ All requests use `USER_TIMEZONE` (normally `Asia/Singapore`).
 | Delete one event | `remove dentist tomorrow` |
 | Delete a recurring series | `remove the weekly Monday gym sessions` |
 | Set/change a reminder | `set a reminder one day before IPPT` or `change the reminder for supper to 8:50pm` |
+| Add another reminder | `add another reminder for IPPT 15 minutes before to leave now` |
 | Remove a reminder | `disable reminder for IPPT` |
 | List reminders | `reminders` or `show me all upcoming reminders` |
 
@@ -120,8 +122,9 @@ Create an account at [cron-job.org](https://cron-job.org/). Generate `SCHEDULER_
 - Every minute: `https://YOUR-SERVICE.onrender.com/scheduled/reminders`
 - Daily at 08:00, timezone `Asia/Singapore`: `https://YOUR-SERVICE.onrender.com/scheduled/daily-agenda`
 
-Add reminders in natural language, for example: `Dentist tomorrow at 2pm, remind me 30 minutes before`.
-For an existing event, say: `Set a reminder one day before IPPT`.
+Add custom or multiple reminders in natural language, for example: `Dentist tomorrow at 2pm, remind me 1 hour before to bring ID and 15 minutes before`.
+For an existing event, say: `Set a reminder one day before IPPT` or `add another reminder for IPPT 15 minutes before to leave now`.
+For an independent reminder, say: `remind me to pay the bill tomorrow at 9am`. It is stored as a private, transparent Google Calendar entry and excluded from normal event lists.
 
 ### Verified scheduler status
 

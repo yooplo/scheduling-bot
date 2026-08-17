@@ -43,7 +43,7 @@ state file if needed. Runs as a webhook-based web service on a free host
 
 ### 3.2 Scheduled Notifications
 
-- `POST /scheduled/reminders` is called every minute by cron-job.org. It validates `SCHEDULER_SECRET`, finds due reminders, sends Telegram messages, and marks each reminder as sent in the event's private Google Calendar metadata.
+- `POST /scheduled/reminders` is called every minute by cron-job.org. It validates `SCHEDULER_SECRET`, finds due reminders, sends Telegram messages, and marks each reminder as sent in private Google Calendar metadata. Events may have multiple custom Telegram reminders. Independent reminders are transparent, private Calendar entries excluded from normal event lists.
 - `POST /scheduled/daily-agenda` is called once daily at the configured `DAILY_AGENDA_HOUR` in `USER_TIMEZONE` and sends the day's agenda to the owner.
 - Scheduler requests use an `Authorization: Bearer <SCHEDULER_SECRET>` header; direct unauthorised calls are rejected.
 - Users can add a reminder while creating an event or request one for an existing event. Existing-event reminders use the same event matching and disambiguation flow as edits and deletes.
@@ -167,6 +167,7 @@ language and routed by intent:
 | "Gym every Monday at 8pm" | add weekly recurring event |
 | "change the weekly gym series to Tuesdays at 7pm" | edit every occurrence and its recurrence rule |
 | "disable reminder for IPPT" | remove reminder |
+| "remind me to pay the bill tomorrow at 9am" | independent Telegram reminder |
 | "what's on my calendar this week" / "list upcoming" | list |
 | "what are my plans on 19 Aug" | list events for that specific day |
 | `/start` | personalised welcome message with usage examples |
@@ -213,7 +214,7 @@ Groq only for field extraction** — cheaper and more predictable.
 5. If confident, patch the Google Calendar event and confirm the updated time
 
 ### 8.5 Reminders, recurring events, conflicts, and free time
-- A reminder can be attached while creating an event or added, changed, listed, or removed later.
+- An event can have multiple attached reminders, each with optional custom Telegram text. A reminder can also be independent of an event; it is stored privately as a transparent Calendar entry so it survives host restarts and is excluded from normal event listings.
 - The scheduler checks reminder metadata every minute and sends the Telegram notification once.
 - Common weekly wording (`every Monday`) becomes a Google Calendar `RRULE:FREQ=WEEKLY;BYDAY=...` series. Recurring-series deletion removes the series master.
 - Before inserting an event, the app checks the next 30 days for overlap. The user must include `add anyway` to override a conflict warning.

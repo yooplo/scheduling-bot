@@ -11,7 +11,7 @@ from fastapi import FastAPI, Header, HTTPException, Request, Response
 
 from .calendar_client import CalendarClient
 from .config import ConfigurationError, Settings, get_settings
-from .models import CalendarEvent, ParsedEdit
+from .models import CalendarEvent, ParsedEdit, ReminderSpec, ScheduledReminder
 from .parser import GroqParser, ParseError
 from .telegram_client import TelegramClient, valid_webhook_secret
 
@@ -99,10 +99,11 @@ async def scheduled_reminders(authorization: str | None = Header(default=None)) 
     if authorization != f"Bearer {settings.scheduler_secret}":
         raise HTTPException(status_code=401, detail="Invalid scheduler secret")
     for telegram_user_id, calendar in calendars.items():
-        events = await asyncio.to_thread(calendar.due_reminders)
-        for event in events:
-            await telegram.send_message(telegram_user_id, f"⏰ Reminder: {event.title} starts at {_format_time(event.start)}")
-            await asyncio.to_thread(calendar.mark_reminder_sent, event.event_id)
+        reminders = await asyncio.to_thread(calendar.due_reminders)
+        for reminder in reminders:
+            text = reminder.reminder.message or (f"Reminder: {reminder.event_title} starts at {_format_time(reminder.due_at + timedelta(minutes=reminder.reminder.minutes_before or 0))}" if reminder.event_title else "Reminder")
+            await telegram.send_message(telegram_user_id, f"⏰ {text}")
+            await asyncio.to_thread(calendar.mark_reminder_sent, reminder.event_id, reminder.reminder.reminder_id)
     return Response(status_code=204)
 
 
@@ -129,7 +130,10 @@ async def handle_message(chat_id: int, text: str, settings: Settings, telegram: 
             elif pending.action == "edit":
                 await _edit_event(chat_id, pending.request_text, selected, settings, telegram, calendar, parser)
             elif pending.action == "clear_reminder":
-                await asyncio.to_thread(calendar.clear_reminder, selected.event_id)
+                if selected.is_standalone_reminder:
+                    await asyncio.to_thread(calendar.delete_event, selected.event_id)
+                else:
+                    await asyncio.to_thread(calendar.clear_reminder, selected.event_id)
                 await telegram.send_message(chat_id, f"🔕 Reminder removed: {selected.title}")
             else:
                 await _set_reminder(chat_id, pending.request_text, selected, settings, telegram, calendar, parser)
@@ -146,22 +150,32 @@ async def handle_message(chat_id: int, text: str, settings: Settings, telegram: 
         else:
             events = await asyncio.to_thread(calendar.list_events, 7)
             await telegram.send_message(chat_id, _format_free_slots(events, settings, 7))
+    elif _is_standalone_reminder_request(lowered):
+        standalone = await asyncio.to_thread(parser.parse_standalone_reminder, text, datetime.now(settings.timezone), settings.user_timezone)
+        if standalone.confidence == "low" or standalone.due_at.tzinfo is None:
+            await telegram.send_message(chat_id, "Tell me what to remind you about and when, for example: 'remind me to pay the bill tomorrow at 9am'.")
+            return
+        await asyncio.to_thread(calendar.create_standalone_reminder, standalone.message, standalone.due_at)
+        await telegram.send_message(chat_id, f"⏰ Reminder set: {standalone.message}\n📅 {_format_time(standalone.due_at)}")
     elif "reminder" in lowered and any(word in lowered for word in ("remove", "disable", "cancel", "delete")):
         events = await asyncio.to_thread(calendar.list_events, 30)
+        events += await asyncio.to_thread(calendar.list_standalone_reminder_events, 30)
         match = await asyncio.to_thread(parser.match_event, text, events)
         selected = next((event for event in events if event.event_id == match.matched_event_id), None)
         if selected and not match.ambiguous:
-            await asyncio.to_thread(calendar.clear_reminder, selected.event_id)
+            if selected.is_standalone_reminder:
+                await asyncio.to_thread(calendar.delete_event, selected.event_id)
+            else:
+                await asyncio.to_thread(calendar.clear_reminder, selected.event_id)
             await telegram.send_message(chat_id, f"🔕 Reminder removed: {selected.title}")
             return
         await _ask_to_select(chat_id, "clear_reminder", text, events, match, telegram)
     elif any(phrase in lowered for phrase in REMINDER_LIST_PHRASES):
-        events = await asyncio.to_thread(calendar.list_events, 30)
-        reminders = [event for event in events if event.reminder_minutes and not event.reminder_sent]
+        reminders = [reminder for reminder in await asyncio.to_thread(calendar.list_reminders, 30) if reminder.due_at >= datetime.now(settings.timezone)]
         if not reminders:
             await telegram.send_message(chat_id, "No upcoming Telegram reminders.")
         else:
-            lines = [_format_reminder_listing(event, index) for index, event in enumerate(reminders, 1)]
+            lines = [_format_reminder_listing(reminder, index) for index, reminder in enumerate(reminders, 1)]
             await telegram.send_message(chat_id, "Upcoming reminders:\n\n" + "\n\n".join(lines))
     elif any(word in lowered for word in DELETE_WORDS):
         events = await asyncio.to_thread(calendar.list_events, 30)
@@ -224,7 +238,9 @@ async def handle_message(chat_id: int, text: str, settings: Settings, telegram: 
     else:
         now = datetime.now(settings.timezone)
         event = await asyncio.to_thread(parser.parse_event, text, now, settings.user_timezone)
-        event.reminder_minutes = event.reminder_minutes or _reminder_minutes_from_text(text)
+        event.reminders = _reminders_from_text(text)
+        if not event.reminders and event.reminder_minutes:
+            event.reminders = [ReminderSpec(minutes_before=event.reminder_minutes, message=_reminder_message_from_text(text))]
         _apply_recurrence_from_text(event, text)
         if event.confidence == "low":
             await telegram.send_message(chat_id, "I need a clearer date and time. For example: 'dentist tomorrow 2–3pm'.")
@@ -239,9 +255,8 @@ async def handle_message(chat_id: int, text: str, settings: Settings, telegram: 
             return
         created = await asyncio.to_thread(calendar.create_event, event)
         reminder_confirmation = ""
-        if event.reminder_minutes:
-            unit = "minute" if event.reminder_minutes == 1 else "minutes"
-            reminder_confirmation = f"\n⏰ Reminder set: {event.reminder_minutes} {unit} before"
+        if event.reminders:
+            reminder_confirmation = "\n⏰ " + _reminder_confirmation(event.reminders)
         recurrence_confirmation = "\n🔁 Repeats weekly" if event.recurrence else ""
         await telegram.send_message(chat_id, f"✅ Added: {created.title} — {_format_time(created.start)}–{_format_time(created.end)}{recurrence_confirmation}{reminder_confirmation}")
 
@@ -277,15 +292,23 @@ async def _set_reminder(chat_id: int, text: str, event: CalendarEvent, settings:
     if reminder.confidence == "low":
         await telegram.send_message(chat_id, "Tell me when to remind you, for example: 'set a reminder one day before IPPT'.")
         return
-    await asyncio.to_thread(calendar.set_reminder, event.event_id, reminder.reminder_minutes)
+    message = _reminder_message_from_text(text)
+    append = any(word in text.lower() for word in ("another", "also", "additional"))
+    await asyncio.to_thread(calendar.set_reminder, event.event_id, reminder.reminder_minutes, message, append)
     unit = "minute" if reminder.reminder_minutes == 1 else "minutes"
-    await telegram.send_message(chat_id, f"⏰ Reminder set: {event.title} — {reminder.reminder_minutes} {unit} before {_format_time(event.start)}")
+    action = "Additional reminder set" if append else "Reminder set"
+    message_line = f"\n📝 {message}" if message else ""
+    await telegram.send_message(chat_id, f"⏰ {action}: {event.title} — {reminder.reminder_minutes} {unit} before {_format_time(event.start)}{message_line}")
 
 
 def _is_existing_reminder_request(text: str) -> bool:
     if text.startswith(REMINDER_PREFIXES):
         return True
-    return "reminder" in text and any(word in text for word in EDIT_WORDS)
+    return "reminder" in text and (any(word in text for word in EDIT_WORDS) or "another reminder" in text or "additional reminder" in text)
+
+
+def _is_standalone_reminder_request(text: str) -> bool:
+    return text.startswith("remind me to ") or text.startswith("remind me at ")
 
 
 def _is_series_edit(text: str, event: CalendarEvent) -> bool:
@@ -412,11 +435,43 @@ def _format_series_update_confirmation(event: CalendarEvent, recurrence: str | N
     return "\n".join(lines)
 
 
-def _format_reminder_listing(event: CalendarEvent, index: int) -> str:
-    assert event.reminder_minutes is not None
-    reminder_at = event.start - timedelta(minutes=event.reminder_minutes)
-    unit = "minute" if event.reminder_minutes == 1 else "minutes"
-    return f"{index}. {event.title}\n   ⏰ {_format_time(reminder_at)} ({event.reminder_minutes} {unit} before)\n   📅 {_format_event_range(event)}"
+def _format_reminder_listing(reminder: ScheduledReminder, index: int) -> str:
+    text = reminder.reminder.message or (f"{reminder.event_title} reminder" if reminder.event_title else "Standalone reminder")
+    if reminder.standalone:
+        return f"{index}. {text}\n   ⏰ {_format_time(reminder.due_at)}"
+    minutes = reminder.reminder.minutes_before or 0
+    unit = "minute" if minutes == 1 else "minutes"
+    return f"{index}. {text}\n   ⏰ {_format_time(reminder.due_at)} ({minutes} {unit} before)\n   📅 {reminder.event_title}"
+
+
+def _reminder_confirmation(reminders: list[ReminderSpec]) -> str:
+    leads = []
+    for reminder in reminders:
+        minutes = reminder.minutes_before or 0
+        unit = "minute" if minutes == 1 else "minutes"
+        suffix = f" — {reminder.message}" if reminder.message else ""
+        leads.append(f"{minutes} {unit} before{suffix}")
+    return "Reminders set: " + "; ".join(leads)
+
+
+def _reminder_message_from_text(text: str) -> str | None:
+    match = re.search(r"\bbefore\s*(?:to\s+|:\s*)(.+)$", text, flags=re.IGNORECASE)
+    return match.group(1).strip() if match else None
+
+
+def _reminders_from_text(text: str) -> list[ReminderSpec]:
+    reminders: list[ReminderSpec] = []
+    for match in re.finditer(r"\b(\d+)\s*(minutes?|mins?|hours?|hrs?|days?)\s+before\b", text, flags=re.IGNORECASE):
+        amount = int(match.group(1))
+        unit = match.group(2).lower()
+        minutes = amount * (1440 if unit.startswith("day") else 60 if unit.startswith(("hour", "hr")) else 1)
+        remainder = text[match.end():]
+        message_match = re.match(r"\s*(?:to\s+|:\s*)([^,;.]+)", remainder, flags=re.IGNORECASE)
+        message = message_match.group(1).strip() if message_match else None
+        if message:
+            message = re.split(r"\s+and\s+\d+\s*(?:minutes?|mins?|hours?|hrs?|days?)\s+before\b", message, maxsplit=1, flags=re.IGNORECASE)[0].strip()
+        reminders.append(ReminderSpec(minutes_before=minutes, message=message))
+    return reminders
 
 
 def _reminder_minutes_from_text(text: str) -> int | None:

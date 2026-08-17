@@ -6,7 +6,7 @@ from datetime import datetime
 from groq import Groq
 from pydantic import ValidationError
 
-from .models import CalendarEvent, DeleteMatch, ParsedEdit, ParsedEvent, ParsedReminder
+from .models import CalendarEvent, DeleteMatch, ParsedEdit, ParsedEvent, ParsedReminder, ParsedStandaloneReminder
 
 
 class ParseError(RuntimeError):
@@ -65,6 +65,13 @@ Convert days and hours to whole minutes (one day is 1440 minutes). Use low confi
 Schema: {{\"reminder_minutes\":integer,\"confidence\":\"high\"|\"low\"}}
 User request: {message}"""
         return self._request_model(prompt, ParsedReminder)
+
+    def parse_standalone_reminder(self, message: str, now: datetime, timezone_name: str) -> ParsedStandaloneReminder:
+        prompt = f"""Extract one standalone Telegram reminder from the user's message. Return JSON only.
+Current datetime: {now.isoformat()}. User timezone: {timezone_name}. Resolve relative dates against that datetime. `message` is what Telegram should say; remove command words and date/time details. `due_at` must include an offset. Use low confidence if the reminder text or date/time is unclear.
+Schema: {{\"message\":string,\"due_at\":ISO8601,\"confidence\":\"high\"|\"low\"}}
+User request: {message}"""
+        return self._request_model(prompt, ParsedStandaloneReminder)
 
     def parse_reminder_for_event(self, message: str, event: CalendarEvent, timezone_name: str) -> ParsedReminder:
         prompt = f"""Extract the requested Telegram reminder lead time for this existing event. Return JSON only.
