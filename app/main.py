@@ -106,7 +106,7 @@ async def scheduled_reminders(authorization: str | None = Header(default=None)) 
         for reminder in reminders:
             text = reminder.reminder.message or (f"Reminder: {reminder.event_title} starts at {_format_time(reminder.due_at + timedelta(minutes=reminder.reminder.minutes_before or 0))}" if reminder.event_title else "Reminder")
             await telegram.send_message(telegram_user_id, f"⏰ {text}")
-            await asyncio.to_thread(calendar.mark_reminder_sent, reminder.event_id, reminder.reminder.reminder_id)
+            await asyncio.to_thread(calendar.mark_reminder_sent, reminder.event_id, reminder.reminder.reminder_id, reminder.calendar_id)
     return Response(status_code=204)
 
 
@@ -134,9 +134,9 @@ async def handle_message(chat_id: int, text: str, settings: Settings, telegram: 
                 await _edit_event(chat_id, pending.request_text, selected, settings, telegram, calendar, parser)
             elif pending.action == "clear_reminder":
                 if selected.is_standalone_reminder:
-                    await asyncio.to_thread(calendar.delete_event, selected.event_id)
+                    await asyncio.to_thread(calendar.delete_event, selected)
                 else:
-                    await asyncio.to_thread(calendar.clear_reminder, selected.event_id)
+                    await asyncio.to_thread(calendar.clear_reminder, selected)
                 await telegram.send_message(chat_id, f"🔕 Reminder removed: {selected.title}")
             else:
                 await _set_reminder(chat_id, pending.request_text, selected, settings, telegram, calendar, parser)
@@ -153,6 +153,9 @@ async def handle_message(chat_id: int, text: str, settings: Settings, telegram: 
         else:
             events = await asyncio.to_thread(calendar.list_events, 7)
             await telegram.send_message(chat_id, _format_free_slots(events, settings, 7))
+    elif _is_calendar_list_request(lowered):
+        calendars = await asyncio.to_thread(calendar.list_calendars)
+        await telegram.send_message(chat_id, _format_calendar_list(calendars))
     elif _is_standalone_reminder_request(lowered):
         standalone = await asyncio.to_thread(parser.parse_standalone_reminder, text, datetime.now(settings.timezone), settings.user_timezone)
         if standalone.confidence == "low" or standalone.due_at.tzinfo is None:
@@ -167,9 +170,9 @@ async def handle_message(chat_id: int, text: str, settings: Settings, telegram: 
         selected = next((event for event in events if event.event_id == match.matched_event_id), None)
         if selected and not match.ambiguous:
             if selected.is_standalone_reminder:
-                await asyncio.to_thread(calendar.delete_event, selected.event_id)
+                await asyncio.to_thread(calendar.delete_event, selected)
             else:
-                await asyncio.to_thread(calendar.clear_reminder, selected.event_id)
+                await asyncio.to_thread(calendar.clear_reminder, selected)
             await telegram.send_message(chat_id, f"🔕 Reminder removed: {selected.title}")
             return
         await _ask_to_select(chat_id, "clear_reminder", text, events, match, telegram)
@@ -194,7 +197,7 @@ async def handle_message(chat_id: int, text: str, settings: Settings, telegram: 
         match = await asyncio.to_thread(parser.match_event, text, events)
         selected = next((e for e in events if e.event_id == match.matched_event_id), None)
         if selected and not match.ambiguous:
-            await asyncio.to_thread(calendar.delete_event, selected.event_id)
+            await asyncio.to_thread(calendar.delete_event, selected)
             await telegram.send_message(chat_id, f"✅ Deleted: {selected.title} — {_format_time(selected.start)}")
             return
         await _ask_to_select(chat_id, "delete", text, events, match, telegram)
@@ -257,16 +260,24 @@ async def handle_message(chat_id: int, text: str, settings: Settings, telegram: 
             details = "\n".join(f"• {existing.title} — {_format_event_range(existing)}" for existing in conflicts[:3])
             await telegram.send_message(chat_id, "⚠️ This overlaps with:\n" + details + "\n\nReply with 'add anyway' plus your event details to continue.")
             return
-        created = await asyncio.to_thread(calendar.create_event, event)
+        target_calendar = await asyncio.to_thread(calendar.resolve_calendar, event.calendar_name)
+        if event.calendar_name and target_calendar is None:
+            await telegram.send_message(chat_id, f"I couldn't find a calendar named '{event.calendar_name}'. Send 'calendar types' to see your available calendars.")
+            return
+        if target_calendar and target_calendar.access_role not in {"owner", "writer"}:
+            await telegram.send_message(chat_id, f"I can see {target_calendar.name}, but you do not have permission to add events to it.")
+            return
+        created = await asyncio.to_thread(calendar.create_event, event, target_calendar.calendar_id if target_calendar else None)
         reminder_confirmation = ""
         if event.reminders:
             reminder_confirmation = "\n⏰ " + _reminder_confirmation(event.reminders)
         recurrence_confirmation = "\n🔁 Repeats weekly" if event.recurrence else ""
-        await telegram.send_message(chat_id, f"✅ Added: {created.title} — {_format_time(created.start)}–{_format_time(created.end)}{recurrence_confirmation}{reminder_confirmation}")
+        calendar_confirmation = f"\n🗓️ Calendar: {target_calendar.name}" if target_calendar else ""
+        await telegram.send_message(chat_id, f"✅ Added: {created.title} — {_format_time(created.start)}–{_format_time(created.end)}{calendar_confirmation}{recurrence_confirmation}{reminder_confirmation}")
 
 
 async def _delete_event(chat_id: int, event: CalendarEvent, telegram: TelegramClient, calendar: CalendarClient) -> None:
-    await asyncio.to_thread(calendar.delete_event, event.event_id)
+    await asyncio.to_thread(calendar.delete_event, event)
     await telegram.send_message(chat_id, f"✅ Deleted: {event.title} — {_format_time(event.start)}")
 
 
@@ -287,7 +298,7 @@ async def _edit_event(chat_id: int, text: str, existing: CalendarEvent, settings
         updated = await asyncio.to_thread(calendar.update_series, existing, edited)
         await telegram.send_message(chat_id, _format_series_update_confirmation(updated, edited.recurrence))
         return
-    updated = await asyncio.to_thread(calendar.update_event, existing.event_id, edited)
+    updated = await asyncio.to_thread(calendar.update_event, existing, edited)
     await telegram.send_message(chat_id, _format_update_confirmation(updated))
 
 
@@ -298,7 +309,7 @@ async def _set_reminder(chat_id: int, text: str, event: CalendarEvent, settings:
         return
     message = _reminder_message_from_text(text)
     append = any(word in text.lower() for word in ("another", "also", "additional"))
-    await asyncio.to_thread(calendar.set_reminder, event.event_id, reminder.reminder_minutes, message, append)
+    await asyncio.to_thread(calendar.set_reminder, event, reminder.reminder_minutes, message, append)
     unit = "minute" if reminder.reminder_minutes == 1 else "minutes"
     action = "Additional reminder set" if append else "Reminder set"
     message_line = f"\n📝 {message}" if message else ""
@@ -313,6 +324,10 @@ def _is_existing_reminder_request(text: str) -> bool:
 
 def _is_standalone_reminder_request(text: str) -> bool:
     return text.startswith("remind me to ") or text.startswith("remind me at ")
+
+
+def _is_calendar_list_request(text: str) -> bool:
+    return any(phrase in text for phrase in ("calendar types", "list calendars", "show calendars", "my calendars", "what calendars"))
 
 
 def _is_series_edit(text: str, event: CalendarEvent) -> bool:
@@ -432,6 +447,8 @@ def _format_event_range(event: CalendarEvent) -> str:
 def _format_event_listing(event: CalendarEvent, index: int | None = None, bullet: bool = False) -> str:
     prefix = "•" if bullet else f"{index}."
     lines = [f"{prefix} {event.title}", f"   {_format_event_range(event)}"]
+    if event.calendar_name:
+        lines.append(f"   🗓️ {event.calendar_name}")
     if event.location:
         lines.append(f"   📍 {event.location}")
     return "\n".join(lines)
@@ -439,6 +456,8 @@ def _format_event_listing(event: CalendarEvent, index: int | None = None, bullet
 
 def _format_update_confirmation(event: CalendarEvent) -> str:
     lines = [f"✅ Updated: {event.title}", f"📅 {_format_event_range(event)}"]
+    if event.calendar_name:
+        lines.append(f"🗓️ {event.calendar_name}")
     if event.location:
         lines.append(f"📍 {event.location}")
     return "\n".join(lines)
@@ -451,6 +470,17 @@ def _format_series_update_confirmation(event: CalendarEvent, recurrence: str | N
     if recurrence:
         lines.append("🔁 Recurrence rule updated")
     return "\n".join(lines)
+
+
+def _format_calendar_list(calendars) -> str:
+    if not calendars:
+        return "I couldn't find any calendars available to this Google account."
+    lines = []
+    for calendar in calendars:
+        default = " (default)" if calendar.primary else ""
+        color = calendar.background_color or "colour unavailable"
+        lines.append(f"• {calendar.name}{default} — {color}")
+    return "Your calendars:\n\n" + "\n".join(lines)
 
 
 def _format_reminder_listing(reminder: ScheduledReminder, index: int) -> str:

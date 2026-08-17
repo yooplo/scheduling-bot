@@ -66,3 +66,26 @@ def test_calendar_event_reads_multiple_private_telegram_reminders():
     })
     assert [reminder.minutes_before for reminder in event.reminders] == [60, 15]
     assert event.reminders[0].message == "Bring ID"
+
+
+def test_list_calendars_reads_names_colours_and_default_calendar():
+    class FakeCalendarList:
+        def list(self, **kwargs):
+            return self
+
+        def execute(self):
+            return {"items": [
+                {"id": "primary-id", "summary": "My calendar", "backgroundColor": "#4285f4", "primary": True, "accessRole": "owner"},
+                {"id": "work-id", "summary": "Work", "backgroundColor": "#a4bdfc", "accessRole": "writer"},
+            ]}
+
+    class FakeService:
+        def calendarList(self):
+            return FakeCalendarList()
+
+    client = CalendarClient.__new__(CalendarClient)
+    client._service = FakeService()
+    calendars = client.list_calendars()
+
+    assert [(calendar.name, calendar.background_color) for calendar in calendars] == [("My calendar", "#4285f4"), ("Work", "#a4bdfc")]
+    assert client.resolve_calendar("work").calendar_id == "work-id"

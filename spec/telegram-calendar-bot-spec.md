@@ -36,7 +36,7 @@ state file if needed. Runs as a webhook-based web service on a free host
 | Bot transport | Telegram Bot API webhooks | Receive messages and send replies |
 | Web service | Python 3.12, FastAPI, Uvicorn | HTTPS webhook and scheduler endpoints |
 | Natural-language parsing | Groq API (`openai/gpt-oss-20b`) | Extract event, edit, delete, and reminder data |
-| Calendar | Google Calendar API v3, OAuth 2.0 | Event CRUD, reminder metadata, and availability data |
+| Calendar | Google Calendar API v3, OAuth 2.0 | Multi-calendar event CRUD, calendar colours, reminder metadata, and availability data |
 | Hosting | Render free web service | Public HTTPS runtime and GitHub deployment |
 | External scheduler | cron-job.org | Minute-by-minute reminders and daily agenda delivery |
 | Testing | pytest | Parser, Calendar conversion, and formatting tests |
@@ -171,6 +171,8 @@ language and routed by intent:
 | "what's on my calendar this week" / "list upcoming" | list |
 | "what are my plans on 19 Aug" | list events for that specific day |
 | "what are my plans on Monday" | list events for the next matching weekday |
+| "calendar types" / "show my calendars" | list accessible calendars and their colours |
+| "Team meeting tomorrow 2pm in Work calendar" | add to the named writable calendar |
 | `/start` | personalised welcome message with usage examples |
 | Reply to a pending disambiguation ("2" or "the second one") | resolve pending delete |
 
@@ -216,6 +218,7 @@ Groq only for field extraction** — cheaper and more predictable.
 
 ### 8.5 Reminders, recurring events, conflicts, and free time
 - An event can have multiple attached reminders, each with optional custom Telegram text. A reminder can also be independent of an event; it is stored privately as a transparent Calendar entry so it survives host restarts and is excluded from normal event listings.
+- The Calendar API's calendar list is used to show each accessible calendar's name and `backgroundColor` hex value. Lists, free-time checks, edits, deletes, and reminders span accessible calendars. A new event uses the default configured calendar unless its message explicitly names one; read-only calendars are never selected for insertion.
 - The scheduler checks reminder metadata every minute and sends the Telegram notification once.
 - Common weekly wording (`every Monday`) becomes a Google Calendar `RRULE:FREQ=WEEKLY;BYDAY=...` series. Recurring-series deletion removes the series master.
 - Before inserting an event, the app checks the next 30 days for overlap. The user must include `add anyway` to override a conflict warning.

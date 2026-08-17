@@ -17,6 +17,7 @@ class ParsedEvent(BaseModel):
     reminder_minutes: int | None = Field(default=None, ge=1, le=10080)
     reminders: list["ReminderSpec"] = Field(default_factory=list)
     recurrence: str | None = None
+    calendar_name: str | None = Field(default=None, max_length=300)
 
 
 class ParsedEdit(BaseModel):
@@ -75,10 +76,21 @@ class CalendarEvent(BaseModel):
     reminders: list[ReminderSpec] = Field(default_factory=list)
     is_standalone_reminder: bool = False
     recurring_event_id: str | None = None
+    calendar_id: str | None = None
+    calendar_name: str | None = None
+
+
+class CalendarInfo(BaseModel):
+    calendar_id: str
+    name: str
+    background_color: str | None = None
+    access_role: str | None = None
+    primary: bool = False
 
 
 class ScheduledReminder(BaseModel):
     event_id: str
+    calendar_id: str | None = None
     reminder: ReminderSpec
     due_at: datetime
     event_title: str | None = None
