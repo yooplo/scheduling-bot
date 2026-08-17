@@ -170,6 +170,7 @@ language and routed by intent:
 | "remind me to pay the bill tomorrow at 9am" | independent Telegram reminder |
 | "what's on my calendar this week" / "list upcoming" | list |
 | "what are my plans on 19 Aug" | list events for that specific day |
+| "what are my plans on Monday" | list events for the next matching weekday |
 | `/start` | personalised welcome message with usage examples |
 | Reply to a pending disambiguation ("2" or "the second one") | resolve pending delete |
 

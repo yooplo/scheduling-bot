@@ -1,7 +1,7 @@
 from datetime import datetime
 from zoneinfo import ZoneInfo
 
-from app.main import LIST_WORDS, _apply_recurrence_from_text, _date_from_text, _format_event_listing, _format_event_range, _format_update_confirmation, _is_series_edit, _reminder_message_from_text, _reminder_minutes_from_text, _reminders_from_text, _unauthorised_message, _welcome_message
+from app.main import LIST_WORDS, _apply_recurrence_from_text, _date_from_text, _format_event_listing, _format_event_range, _format_update_confirmation, _is_series_edit, _reminder_message_from_text, _reminder_minutes_from_text, _reminders_from_text, _unauthorised_message, _upcoming_weekday_from_text, _welcome_message
 from app.models import ParsedEvent
 from app.models import CalendarEvent
 
@@ -83,3 +83,13 @@ def test_reminder_text_supports_multiple_custom_reminders():
 
 def test_unauthorised_message_includes_access_contact():
     assert "@juzteeeen" in _unauthorised_message()
+
+
+def test_weekday_query_resolves_to_the_next_matching_day():
+    class Settings:
+        timezone = ZoneInfo("Asia/Singapore")
+
+    target = _upcoming_weekday_from_text("what are my plans on monday", Settings())
+    assert target is not None
+    assert target.weekday() == 0
+    assert target >= datetime.now(ZoneInfo("Asia/Singapore")).date()
