@@ -1,7 +1,7 @@
 from datetime import datetime
 from zoneinfo import ZoneInfo
 
-from app.main import LIST_WORDS, _apply_recurrence_from_text, _date_from_text, _format_calendar_list, _format_event_listing, _format_event_range, _format_update_confirmation, _is_explicit_add_request, _is_series_edit, _reminder_message_from_text, _reminder_minutes_from_text, _reminders_from_text, _unauthorised_message, _upcoming_weekday_from_text, _welcome_message
+from app.main import LIST_WORDS, _apply_recurrence_from_text, _calendar_colour_emoji, _date_from_text, _format_calendar_list, _format_event_listing, _format_event_range, _format_update_confirmation, _is_explicit_add_request, _is_series_edit, _reminder_message_from_text, _reminder_minutes_from_text, _reminders_from_text, _unauthorised_message, _upcoming_weekday_from_text, _welcome_message
 from app.models import ParsedEvent
 from app.models import CalendarEvent, CalendarInfo
 
@@ -106,7 +106,11 @@ def test_weekday_query_resolves_to_the_next_matching_day():
 
 def test_calendar_list_includes_calendar_colours():
     output = _format_calendar_list([CalendarInfo(calendar_id="work", name="Work", background_color="#a4bdfc")])
-    assert "Work" in output and "#a4bdfc" in output
+    assert "Work" in output and "🟦" in output
+
+
+def test_calendar_colour_emoji_uses_nearest_supported_colour():
+    assert _calendar_colour_emoji("#7bd148") == "🟩"
 
 
 def test_add_request_wins_over_calendar_list_keyword():

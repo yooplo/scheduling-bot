@@ -19,7 +19,7 @@ All requests use `USER_TIMEZONE` (normally `Asia/Singapore`).
 | List the next 7 days | `list`, `upcoming`, or `schedule` |
 | List a specific day | `what are my plans on 19 Aug?` |
 | List the next named weekday | `what are my plans on Monday?` |
-| Show calendar types/colours | `calendar types` or `show my calendars` |
+| Show calendar types/colours | `calendar types` or `show my calendars` (closest colour-square emoji) |
 | Add to a specific calendar | `Team meeting tomorrow 2pm in Work calendar` |
 | List today/tomorrow | `plans tmr`, `what are my plans tomorrow?`, or `show my schedule today` |
 | Find availability | `when am I free tmr?` or `find free time this week` |

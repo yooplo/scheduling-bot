@@ -482,9 +482,20 @@ def _format_calendar_list(calendars) -> str:
     lines = []
     for calendar in calendars:
         default = " (default)" if calendar.primary else ""
-        color = calendar.background_color or "colour unavailable"
-        lines.append(f"• {calendar.name}{default} — {color}")
+        lines.append(f"{_calendar_colour_emoji(calendar.background_color)} {calendar.name}{default}")
     return "Your calendars:\n\n" + "\n".join(lines)
+
+
+def _calendar_colour_emoji(hex_colour: str | None) -> str:
+    if not hex_colour or not re.fullmatch(r"#[0-9a-fA-F]{6}", hex_colour):
+        return "⬜"
+    red, green, blue = (int(hex_colour[index:index + 2], 16) for index in (1, 3, 5))
+    palette = {
+        "🟥": (220, 60, 50), "🟧": (245, 145, 45), "🟨": (235, 205, 50),
+        "🟩": (80, 165, 85), "🟦": (65, 130, 220), "🟪": (155, 95, 190),
+        "🟫": (135, 90, 55), "⬛": (35, 35, 35), "⬜": (235, 235, 235),
+    }
+    return min(palette, key=lambda emoji: sum((component - reference) ** 2 for component, reference in zip((red, green, blue), palette[emoji])))
 
 
 def _format_reminder_listing(reminder: ScheduledReminder, index: int) -> str:
