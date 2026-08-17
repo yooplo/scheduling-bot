@@ -1,7 +1,7 @@
 from datetime import datetime
 from zoneinfo import ZoneInfo
 
-from app.main import _apply_recurrence_from_text, _date_from_text, _format_event_listing, _format_event_range, _format_update_confirmation, _reminder_minutes_from_text, _welcome_message
+from app.main import LIST_WORDS, _apply_recurrence_from_text, _date_from_text, _format_event_listing, _format_event_range, _format_update_confirmation, _reminder_minutes_from_text, _welcome_message
 from app.models import ParsedEvent
 from app.models import CalendarEvent
 
@@ -59,3 +59,7 @@ def test_explicit_date_is_extracted_from_free_time_query():
 
 def test_welcome_message_uses_telegram_first_name():
     assert _welcome_message("Justin").startswith("Hi Justin! 👋")
+
+
+def test_singular_plan_is_a_list_intent():
+    assert "plan" in LIST_WORDS

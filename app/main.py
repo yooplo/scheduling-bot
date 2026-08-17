@@ -24,7 +24,7 @@ EDIT_WORDS = ("change", "edit", "move", "reschedule", "update")
 REMINDER_PREFIXES = ("set a reminder", "add a reminder", "remind me")
 REMINDER_LIST_PHRASES = ("reminders", "upcoming reminders", "all reminders", "show reminders", "my reminders")
 FREE_TIME_PHRASES = ("when am i free", "when i'm free", "find free time", "free timing", "free slot", "availability")
-LIST_WORDS = ("list", "show", "what's on", "whats on", "what are my", "upcoming", "calendar", "plans", "schedule")
+LIST_WORDS = ("list", "show", "what's on", "whats on", "what are my", "upcoming", "calendar", "plan", "plans", "schedule")
 PENDING_TTL_SECONDS = 300
 
 
