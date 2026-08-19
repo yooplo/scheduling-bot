@@ -324,7 +324,28 @@ def _is_existing_reminder_request(text: str) -> bool:
 
 
 def _is_standalone_reminder_request(text: str) -> bool:
-    return text.startswith("remind me to ") or text.startswith("remind me at ")
+    lowered = text.strip().lower()
+    if lowered.startswith(("remind me to ", "remind me at ")):
+        return True
+
+    # A lead time links a reminder to an existing event (for example,
+    # "set a reminder one day before IPPT"). An absolute/relative clock time
+    # instead describes an independent notification.
+    if re.search(r"\b(?:minutes?|mins?|hours?|hrs?|days?)\s+before\b", lowered):
+        return False
+    command = re.match(
+        r"^(?:please\s+)?(?:set(?:\s+me)?|add)(?:\s+up)?\s+(?:a\s+)?reminder\b",
+        lowered,
+    )
+    if not command:
+        return False
+    schedule = lowered[command.end():]
+    return bool(re.search(
+        r"\b(?:in\s+\d+\s*(?:minutes?|mins?|hours?|hrs?|days?)\b|"
+        r"today|tonight|tomorrow|tmr|at\s+\d{1,2}(?::|\.)?\d{0,2}\s*(?:am|pm)?|"
+        r"on\s+(?:monday|tuesday|wednesday|thursday|friday|saturday|sunday|\d{1,2}\b))",
+        schedule,
+    ))
 
 
 def _is_calendar_list_request(text: str) -> bool:
@@ -512,10 +533,10 @@ def _calendar_colour_emoji(hex_colour: str | None) -> str:
 def _format_reminder_listing(reminder: ScheduledReminder, index: int) -> str:
     text = reminder.reminder.message or (f"{reminder.event_title} reminder" if reminder.event_title else "Standalone reminder")
     if reminder.standalone:
-        return f"{index}. {text}\n   ⏰ {_format_time(reminder.due_at)}"
+        return f"{index}. {text}\n   🔔 Independent reminder\n   ⏰ {_format_time(reminder.due_at)}"
     minutes = reminder.reminder.minutes_before or 0
     unit = "minute" if minutes == 1 else "minutes"
-    return f"{index}. {text}\n   ⏰ {_format_time(reminder.due_at)} ({minutes} {unit} before)\n   📅 {reminder.event_title}"
+    return f"{index}. {text}\n   🔗 Event reminder\n   ⏰ {_format_time(reminder.due_at)} ({minutes} {unit} before)\n   📅 {reminder.event_title}"
 
 
 def _reminder_confirmation(reminders: list[ReminderSpec]) -> str:

@@ -1,9 +1,9 @@
 from datetime import datetime
 from zoneinfo import ZoneInfo
 
-from app.main import LIST_WORDS, _apply_recurrence_from_text, _calendar_colour_emoji, _date_from_text, _format_calendar_list, _format_event_listing, _format_event_range, _format_update_confirmation, _is_explicit_add_request, _is_series_edit, _reminder_message_from_text, _reminder_minutes_from_text, _reminders_from_text, _unauthorised_message, _upcoming_weekday_from_text, _welcome_message
+from app.main import LIST_WORDS, _apply_recurrence_from_text, _calendar_colour_emoji, _date_from_text, _format_calendar_list, _format_event_listing, _format_event_range, _format_reminder_listing, _format_update_confirmation, _is_explicit_add_request, _is_series_edit, _is_standalone_reminder_request, _reminder_message_from_text, _reminder_minutes_from_text, _reminders_from_text, _unauthorised_message, _upcoming_weekday_from_text, _welcome_message
 from app.models import ParsedEvent
-from app.models import CalendarEvent, CalendarInfo
+from app.models import CalendarEvent, CalendarInfo, ReminderSpec, ScheduledReminder
 
 
 def test_event_range_shows_one_date_for_same_day_event():
@@ -88,6 +88,42 @@ def test_reminder_text_supports_multiple_custom_reminders():
     reminders = _reminders_from_text("dentist tomorrow, remind me 1 hour before to bring ID and 15 minutes before")
     assert [reminder.minutes_before for reminder in reminders] == [60, 15]
     assert _reminder_message_from_text("remind me 1 hour before to bring ID") == "bring ID"
+
+
+def test_set_me_a_reminder_with_a_due_time_is_standalone():
+    assert _is_standalone_reminder_request(
+        "set me a reminder for tonight at 11.50pm to book the bedok court"
+    )
+
+
+def test_relative_duration_reminder_is_standalone():
+    assert _is_standalone_reminder_request("set a reminder in 15minutes to shower")
+
+
+def test_lead_time_reminder_stays_linked_to_an_existing_event():
+    assert not _is_standalone_reminder_request("set a reminder one day before IPPT")
+    assert not _is_standalone_reminder_request("remind me 15 minutes before Dental")
+
+
+def test_reminder_listing_distinguishes_both_reminder_types():
+    due_at = datetime.fromisoformat("2026-08-20T13:45:00+08:00")
+    independent = ScheduledReminder(
+        event_id="standalone",
+        reminder=ReminderSpec(message="Shower"),
+        due_at=due_at,
+        standalone=True,
+    )
+    linked = ScheduledReminder(
+        event_id="dental",
+        reminder=ReminderSpec(minutes_before=15),
+        due_at=due_at,
+        event_title="Dental at Bedok",
+    )
+
+    assert "Independent reminder" in _format_reminder_listing(independent, 1)
+    linked_text = _format_reminder_listing(linked, 2)
+    assert "Event reminder" in linked_text
+    assert "Dental at Bedok" in linked_text
 
 
 def test_unauthorised_message_includes_access_contact():
