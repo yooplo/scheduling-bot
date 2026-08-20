@@ -1,7 +1,7 @@
 from datetime import datetime
 from zoneinfo import ZoneInfo
 
-from app.main import LIST_WORDS, _apply_recurrence_from_text, _calendar_colour_emoji, _date_from_text, _format_calendar_list, _format_event_listing, _format_event_range, _format_reminder_listing, _format_update_confirmation, _is_explicit_add_request, _is_series_edit, _is_standalone_reminder_request, _reminder_message_from_text, _reminder_minutes_from_text, _reminders_from_text, _unauthorised_message, _upcoming_weekday_from_text, _welcome_message
+from app.main import LIST_WORDS, _apply_all_day_from_text, _apply_recurrence_from_text, _calendar_colour_emoji, _date_from_text, _format_calendar_list, _format_event_listing, _format_event_range, _format_reminder_listing, _format_update_confirmation, _is_explicit_add_request, _is_series_edit, _is_standalone_reminder_request, _reminder_message_from_text, _reminder_minutes_from_text, _reminders_from_text, _unauthorised_message, _upcoming_weekday_from_text, _welcome_message
 from app.models import ParsedEvent
 from app.models import CalendarEvent, CalendarInfo, ReminderSpec, ScheduledReminder
 
@@ -22,6 +22,25 @@ def test_event_range_shows_both_dates_when_crossing_midnight():
         end=datetime.fromisoformat("2026-08-16T01:00:00+08:00"),
     )
     assert _format_event_range(event) == "Sat 15 Aug 11:00 PM → Sun 16 Aug 1:00 AM"
+
+
+def test_explicit_all_day_event_uses_native_day_boundaries_and_label():
+    class Settings:
+        timezone = ZoneInfo("Asia/Singapore")
+
+    event = ParsedEvent(
+        title="SPD offer email",
+        start="2026-08-19T00:00:00+08:00",
+        end="2026-08-19T23:59:00+08:00",
+        confidence="high",
+    )
+    _apply_all_day_from_text(event, "SPD offer email all day on 19 Aug", Settings())
+
+    assert event.all_day is True
+    assert event.start.isoformat() == "2026-08-19T00:00:00+08:00"
+    assert event.end.isoformat() == "2026-08-20T00:00:00+08:00"
+    calendar_event = CalendarEvent(event_id="all-day", title=event.title, start=event.start, end=event.end, all_day=True)
+    assert _format_event_range(calendar_event) == "Wed 19 Aug · All day"
 
 
 def test_event_listing_includes_location_when_provided():

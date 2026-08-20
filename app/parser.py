@@ -22,8 +22,8 @@ class GroqParser:
         prompt = f"""Extract one calendar event from the user's message. Return JSON only.
 Current datetime: {now.isoformat()}. User timezone: {timezone_name}.
 Resolve relative dates against that datetime. All datetime values must include an offset.
-If no end is given, set it to one hour after start. Extract reminder_minutes if the user says "remind me X minutes/hours before"; otherwise use null. For recurring requests, return an RFC5545 RRULE such as `RRULE:FREQ=WEEKLY;BYDAY=MO`; otherwise null. Set calendar_name only if the user explicitly says to add the event in or under a named calendar; otherwise null. Use low confidence for unclear date or time.
-Schema: {{\"action\":\"add\",\"title\":string,\"start\":ISO8601,\"end\":ISO8601,\"location\":string|null,\"confidence\":\"high\"|\"low\",\"reminder_minutes\":integer|null,\"recurrence\":string|null,\"calendar_name\":string|null}}
+If the user says "all day", set all_day true and use local midnight for start and the following local midnight for end. Otherwise set all_day false. If no end is given for a timed event, set it to one hour after start. Extract reminder_minutes if the user says "remind me X minutes/hours before"; otherwise use null. For recurring requests, return an RFC5545 RRULE such as `RRULE:FREQ=WEEKLY;BYDAY=MO`; otherwise null. Set calendar_name only if the user explicitly says to add the event in or under a named calendar; otherwise null. Use low confidence for an unclear date, or an unclear time unless the event is explicitly all-day.
+Schema: {{\"action\":\"add\",\"title\":string,\"start\":ISO8601,\"end\":ISO8601,\"location\":string|null,\"confidence\":\"high\"|\"low\",\"reminder_minutes\":integer|null,\"recurrence\":string|null,\"calendar_name\":string|null,\"all_day\":boolean}}
 User message: {message}"""
         return self._request_model(prompt, ParsedEvent)
 
@@ -48,13 +48,14 @@ Events: {json.dumps(options)}"""
             "start": existing.start.isoformat(),
             "end": existing.end.isoformat() if existing.end else None,
             "location": existing.location,
+            "all_day": existing.all_day,
         }
         prompt = f"""Apply the user's requested change to the existing calendar event. Return JSON only.
 Timezone: {timezone_name}. Preserve every existing field that the user does not explicitly change.
 If the user specifies only a new start time, preserve the original duration. All datetime values must include an offset.
-If the user explicitly changes a recurring-series rule, return a valid RFC5545 RRULE such as `RRULE:FREQ=WEEKLY;BYDAY=TU`; otherwise return null.
+Preserve all_day unless the user explicitly changes between an all-day and timed event. For all-day events, use local midnight boundaries. If the user explicitly changes a recurring-series rule, return a valid RFC5545 RRULE such as `RRULE:FREQ=WEEKLY;BYDAY=TU`; otherwise return null.
 Use low confidence if the requested change is ambiguous or incomplete.
-Schema: {{\"action\":\"edit\",\"title\":string,\"start\":ISO8601,\"end\":ISO8601,\"location\":string|null,\"confidence\":\"high\"|\"low\",\"recurrence\":string|null}}
+Schema: {{\"action\":\"edit\",\"title\":string,\"start\":ISO8601,\"end\":ISO8601,\"location\":string|null,\"confidence\":\"high\"|\"low\",\"recurrence\":string|null,\"all_day\":boolean}}
 Existing event: {json.dumps(current)}
 User request: {message}"""
         return self._request_model(prompt, ParsedEdit)

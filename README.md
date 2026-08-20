@@ -1,6 +1,6 @@
 # Telegram → Google Calendar bot
 
-A private, webhook-based FastAPI service that understands natural-language Telegram messages and creates, lists, or deletes events in a fixed user's paired Google Calendar. It supports one or two preconfigured Telegram users; each is isolated to their own Google Calendar.
+A private, webhook-based FastAPI service that understands natural-language Telegram messages and manages Google Calendar events, Telegram reminders, recurring schedules, and availability. It supports one or two preconfigured Telegram users; each is isolated to their own Google account and calendars.
 
 Include a location naturally when creating an event, for example: `Dinner at La Pasta Saturday 7–9pm`. Locations are shown in upcoming lists when provided.
 
@@ -11,9 +11,10 @@ All requests use `USER_TIMEZONE` (normally `Asia/Singapore`).
 | Task | Example message |
 |---|---|
 | Add an event | `Dentist tomorrow 2–3pm` |
+| Add a native all-day event | `SPD offer email all day on 19 Aug` |
 | Add a location | `Dinner at La Pasta Saturday 7–9pm` |
 | Add custom or multiple event reminders | `Dentist tomorrow 2pm, remind me 1 hour before to bring ID and 15 minutes before` |
-| Add an independent reminder | `remind me to pay the bill tomorrow at 9am` |
+| Add an independent reminder | `remind me to pay the bill tomorrow at 9am`, `set me a reminder tonight at 11.50pm to book the court`, or `set a reminder in 15minutes to shower` |
 | Add a recurring event | `Gym every Monday at 8pm` |
 | Start the bot | `/start` — receives a personalised welcome and examples |
 | List the next 7 days | `list`, `upcoming`, or `schedule` |
@@ -27,19 +28,28 @@ All requests use `USER_TIMEZONE` (normally `Asia/Singapore`).
 | Edit a whole recurring series | `change the weekly gym series to Tuesdays at 7pm` or `update all gym sessions to be at Studio A` |
 | Delete one event | `remove dentist tomorrow` |
 | Delete a recurring series | `remove the weekly Monday gym sessions` |
-| Set/change a reminder | `set a reminder one day before IPPT` or `change the reminder for supper to 8:50pm` |
+| Set/change an event reminder | `set a reminder one day before IPPT`, `remind me 15 minutes before Dental`, or `change the reminder for supper to 8:50pm` |
 | Add another reminder | `add another reminder for IPPT 15 minutes before to leave now` |
 | Remove a reminder | `disable reminder for IPPT` |
-| List reminders | `reminders` or `show me all upcoming reminders` |
+| List all reminder types | `reminders` or `show me all upcoming reminders` (shows independent and event-linked reminders together) |
 
 The bot warns before creating an event that overlaps an upcoming event. To deliberately create it anyway, repeat the request with `add anyway`, for example `add anyway meeting tomorrow 2–3pm`.
 
 Free-time results cover the full day, from 12:00 AM through 11:59 PM, and show slots of at least one hour. They include events from every calendar the user can view. New events go to the configured default calendar unless a writable named calendar is explicitly specified.
 
+Messages that explicitly say `all day` create native Google Calendar all-day events using date-only boundaries, rather than timed events from 12:00 AM to 11:59 PM. Multi-day all-day events use Google's exclusive end-date convention.
+
+Reminder wording determines whether a notification is independent or event-linked:
+
+- A due time or delay creates an independent reminder: `tonight at 11.50pm`, `tomorrow at 9am`, or `in 15 minutes`.
+- A lead time before a named event links the reminder to that event: `15 minutes before Dental` or `one day before IPPT`.
+- `reminders` lists both types chronologically. Independent reminders are labelled `🔔 Independent reminder`; attached reminders are labelled `🔗 Event reminder` and show the calendar event.
+
 ## Current limitations
 
 - One or two preconfigured Telegram users and calendars only. Adding users or allowing account changes requires a database and web OAuth flow.
-- No voice-message transcription, invitees/attendees, multiple calendars, or undo action.
+- No voice-message transcription, attendee/invitation management, arbitrary user sign-up, or undo action.
+- Only common weekly recurrence wording is supported; arbitrary recurrence schedules are not exposed as a dedicated command flow.
 - Scheduler-based reminders and daily agenda require the cron-job.org setup below; confirm successful `204` job runs before relying on them.
 
 ## What you need before deployment
@@ -127,7 +137,9 @@ Create an account at [cron-job.org](https://cron-job.org/). Generate `SCHEDULER_
 
 Add custom or multiple reminders in natural language, for example: `Dentist tomorrow at 2pm, remind me 1 hour before to bring ID and 15 minutes before`.
 For an existing event, say: `Set a reminder one day before IPPT` or `add another reminder for IPPT 15 minutes before to leave now`.
-For an independent reminder, say: `remind me to pay the bill tomorrow at 9am`. It is stored as a private, transparent Google Calendar entry and excluded from normal event lists.
+For an independent reminder, say: `remind me to pay the bill tomorrow at 9am`, `set me a reminder tonight at 11.50pm to book the court`, or `set a reminder in 15minutes to shower`.
+
+Independent reminders are not associated with an existing event. The bot creates a dedicated hidden `Telegram Reminders` secondary calendar and persists them there as private, transparent records, keeping them out of the user's normal calendar, event lists, and availability results. Each record is deleted after its Telegram notification is delivered. Event-linked and independent reminders use the same minute-by-minute scheduler and both appear under `reminders`.
 
 ### Verified scheduler status
 
@@ -136,7 +148,7 @@ The cron-job.org reminder and daily-agenda jobs have been configured and verifie
 ## Security notes
 
 - The webhook validates Telegram's secret header before processing anything.
-- Messages from any Telegram user not configured as `TELEGRAM_USER_1_ID` or `TELEGRAM_USER_2_ID` are ignored.
+- Messages from any Telegram user not configured as `TELEGRAM_USER_1_ID` or `TELEGRAM_USER_2_ID` receive an access-denied reply and no calendar operation is performed.
 - Each configured user is routed only to their paired Google refresh token and calendar; the bot never exposes one user's events to the other.
 - The bot processes configured users only in private Telegram chats, never groups.
 - Each Google token uses only the Calendar scope.

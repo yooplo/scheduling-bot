@@ -18,6 +18,7 @@ class ParsedEvent(BaseModel):
     reminders: list["ReminderSpec"] = Field(default_factory=list)
     recurrence: str | None = None
     calendar_name: str | None = Field(default=None, max_length=300)
+    all_day: bool = False
 
 
 class ParsedEdit(BaseModel):
@@ -29,6 +30,7 @@ class ParsedEdit(BaseModel):
     location: str | None = Field(default=None, max_length=500)
     confidence: Literal["high", "low"]
     recurrence: str | None = None
+    all_day: bool = False
 
 
 class ParsedReminder(BaseModel):
@@ -78,6 +80,7 @@ class CalendarEvent(BaseModel):
     recurring_event_id: str | None = None
     calendar_id: str | None = None
     calendar_name: str | None = None
+    all_day: bool = False
 
 
 class CalendarInfo(BaseModel):

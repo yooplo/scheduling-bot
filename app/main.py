@@ -250,6 +250,7 @@ async def handle_message(chat_id: int, text: str, settings: Settings, telegram: 
         if not event.reminders and event.reminder_minutes:
             event.reminders = [ReminderSpec(minutes_before=event.reminder_minutes, message=_reminder_message_from_text(text))]
         _apply_recurrence_from_text(event, text)
+        _apply_all_day_from_text(event, text, settings)
         if event.confidence == "low":
             await telegram.send_message(chat_id, "I need a clearer date and time. For example: 'dentist tomorrow 2–3pm'.")
             return
@@ -287,10 +288,11 @@ async def _edit_event(chat_id: int, text: str, existing: CalendarEvent, settings
     if location_match:
         edited = ParsedEdit(
             title=existing.title, start=existing.start, end=existing.end or existing.start,
-            location=location_match.group(1).strip(), confidence="high",
+            location=location_match.group(1).strip(), confidence="high", all_day=existing.all_day,
         )
     else:
         edited = await asyncio.to_thread(parser.parse_edit, text, existing, settings.user_timezone)
+    _apply_all_day_from_text(edited, text, settings)
     if edited.confidence == "low" or edited.start.tzinfo is None or edited.end.tzinfo is None:
         await telegram.send_message(chat_id, "I need a clearer change. For example: 'move IPPT on Saturday to 4pm'.")
         return
@@ -459,6 +461,11 @@ def _format_event_range(event: CalendarEvent) -> str:
     """Format one event with a compact but unambiguous date/time range."""
     start = event.start
     end = event.end
+    if event.all_day:
+        if not end or end.date() <= start.date() + timedelta(days=1):
+            return f"{start:%a} {start.day} {start:%b} · All day"
+        final_day = end.date() - timedelta(days=1)
+        return f"{start:%a} {start.day} {start:%b} → {final_day:%a} {final_day.day} {final_day:%b} · All day"
     if not end:
         return _format_time(start)
     start_date = f"{start:%a} {start.day} {start:%b}"
@@ -598,6 +605,23 @@ def _apply_recurrence_from_text(event, text: str) -> None:
         event.start += timedelta(days=offset)
         event.end += timedelta(days=offset)
     event.recurrence = f"RRULE:FREQ=WEEKLY;BYDAY={rrule_day}"
+
+
+def _apply_all_day_from_text(event, text: str, settings: Settings) -> None:
+    """Convert explicit all-day wording to native date-only boundaries."""
+    if not re.search(r"\ball[\s-]?day\b", text, flags=re.IGNORECASE):
+        return
+    local_start = event.start.astimezone(settings.timezone)
+    local_end = event.end.astimezone(settings.timezone)
+    start_day = local_start.date()
+    end_day = local_end.date()
+    if local_end.time() != datetime.min.time():
+        end_day += timedelta(days=1)
+    if end_day <= start_day:
+        end_day = start_day + timedelta(days=1)
+    event.start = datetime.combine(start_day, datetime.min.time(), tzinfo=settings.timezone)
+    event.end = datetime.combine(end_day, datetime.min.time(), tzinfo=settings.timezone)
+    event.all_day = True
 
 
 def _format_clock(value: datetime) -> str:

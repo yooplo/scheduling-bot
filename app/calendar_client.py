@@ -13,6 +13,8 @@ from .config import CalendarAccount, Settings
 from .models import CalendarEvent, CalendarInfo, ParsedEdit, ParsedEvent, ReminderSpec, ScheduledReminder
 
 CALENDAR_SCOPE = "https://www.googleapis.com/auth/calendar"
+REMINDER_CALENDAR_NAME = "Telegram Reminders"
+REMINDER_CALENDAR_MARKER = "SchedulingBot internal standalone reminder storage"
 
 
 class CalendarClient:
@@ -29,14 +31,11 @@ class CalendarClient:
         self._service = build("calendar", "v3", credentials=credentials, cache_discovery=False)
         self._calendar_id = account.google_calendar_id
         self._timezone = settings.user_timezone
+        self._reminder_calendar_id: str | None = None
 
     def create_event(self, event: ParsedEvent, calendar_id: str | None = None) -> CalendarEvent:
         target_calendar_id = calendar_id or self._calendar_id
-        body = {
-            "summary": event.title,
-            "start": {"dateTime": event.start.isoformat(), "timeZone": self._timezone},
-            "end": {"dateTime": event.end.isoformat(), "timeZone": self._timezone},
-        }
+        body = {"summary": event.title, **self._event_time_body(event.start, event.end, event.all_day)}
         if event.location:
             body["location"] = event.location
         reminders = event.reminders or ([ReminderSpec(minutes_before=event.reminder_minutes)] if event.reminder_minutes else [])
@@ -48,10 +47,13 @@ class CalendarClient:
         return _to_event(item, self._timezone, target_calendar_id)
 
     def list_calendars(self) -> list[CalendarInfo]:
+        return self._list_calendars(show_hidden=False)
+
+    def _list_calendars(self, show_hidden: bool) -> list[CalendarInfo]:
         calendars: list[CalendarInfo] = []
         page_token = None
         while True:
-            result = self._service.calendarList().list(pageToken=page_token, showHidden=False).execute()
+            result = self._service.calendarList().list(pageToken=page_token, showHidden=show_hidden).execute()
             for item in result.get("items", []):
                 calendars.append(CalendarInfo(
                     calendar_id=item["id"], name=item.get("summaryOverride") or item.get("summary") or item["id"],
@@ -60,6 +62,33 @@ class CalendarClient:
             page_token = result.get("nextPageToken")
             if not page_token:
                 return calendars
+
+    def _get_reminder_calendar_id(self, create: bool = False) -> str | None:
+        if getattr(self, "_reminder_calendar_id", None):
+            return self._reminder_calendar_id
+        page_token = None
+        while True:
+            result = self._service.calendarList().list(pageToken=page_token, showHidden=True).execute()
+            for item in result.get("items", []):
+                if item.get("description") == REMINDER_CALENDAR_MARKER:
+                    self._reminder_calendar_id = item["id"]
+                    return self._reminder_calendar_id
+            page_token = result.get("nextPageToken")
+            if not page_token:
+                break
+        if not create:
+            return None
+        created = self._service.calendars().insert(body={
+            "summary": REMINDER_CALENDAR_NAME,
+            "description": REMINDER_CALENDAR_MARKER,
+            "timeZone": self._timezone,
+        }).execute()
+        self._reminder_calendar_id = created["id"]
+        self._service.calendarList().patch(
+            calendarId=self._reminder_calendar_id,
+            body={"selected": False, "hidden": True},
+        ).execute()
+        return self._reminder_calendar_id
 
     def resolve_calendar(self, name: str | None) -> CalendarInfo | None:
         if not name:
@@ -83,7 +112,10 @@ class CalendarClient:
 
     def _list_events_between(self, start: datetime, end: datetime, include_internal: bool = False) -> list[CalendarEvent]:
         events: list[CalendarEvent] = []
-        for calendar in self.list_calendars():
+        calendars = self.list_calendars()
+        if include_internal and (reminder_calendar_id := self._get_reminder_calendar_id()):
+            calendars.append(CalendarInfo(calendar_id=reminder_calendar_id, name=REMINDER_CALENDAR_NAME, access_role="owner"))
+        for calendar in calendars:
             result = self._service.events().list(
                 calendarId=calendar.calendar_id,
                 timeMin=start.isoformat(),
@@ -125,6 +157,9 @@ class CalendarClient:
         target_calendar_id = calendar_id or self._calendar_id
         item = self._service.events().get(calendarId=target_calendar_id, eventId=event_id).execute()
         private = item.get("extendedProperties", {}).get("private", {})
+        if private.get("telegram_reminder_type") == "standalone":
+            self._service.events().delete(calendarId=target_calendar_id, eventId=event_id).execute()
+            return
         reminders = _reminders_from_properties(private)
         for reminder in reminders:
             if reminder.reminder_id == reminder_id:
@@ -157,9 +192,8 @@ class CalendarClient:
     def update_event(self, existing: CalendarEvent, event: ParsedEdit) -> CalendarEvent:
         body = {
             "summary": event.title,
-            "start": {"dateTime": event.start.isoformat(), "timeZone": self._timezone},
-            "end": {"dateTime": event.end.isoformat(), "timeZone": self._timezone},
             "location": event.location or "",
+            **self._event_time_body(event.start, event.end, event.all_day),
         }
         item = self._service.events().patch(
             calendarId=existing.calendar_id or self._calendar_id, eventId=existing.event_id, body=body
@@ -167,6 +201,9 @@ class CalendarClient:
         return _to_event(item, self._timezone, existing.calendar_id, existing.calendar_name)
 
     def create_standalone_reminder(self, message: str, due_at: datetime) -> CalendarEvent:
+        reminder_calendar_id = self._get_reminder_calendar_id(create=True)
+        if not reminder_calendar_id:
+            raise RuntimeError("Could not create standalone reminder calendar")
         reminder = ReminderSpec(message=message)
         body = {
             "summary": "Telegram reminder",
@@ -176,17 +213,16 @@ class CalendarClient:
             "visibility": "private",
             "extendedProperties": {"private": {"telegram_reminder_type": "standalone", "telegram_reminders": _serialize_reminders([reminder])}},
         }
-        item = self._service.events().insert(calendarId=self._calendar_id, body=body).execute()
-        return _to_event(item, self._timezone, self._calendar_id)
+        item = self._service.events().insert(calendarId=reminder_calendar_id, body=body).execute()
+        return _to_event(item, self._timezone, reminder_calendar_id, REMINDER_CALENDAR_NAME)
 
     def update_series(self, event: CalendarEvent, edited: ParsedEdit) -> CalendarEvent:
         """Patch a recurring-event master so the change applies to every occurrence."""
         series_id = event.recurring_event_id or event.event_id
         body = {
             "summary": edited.title,
-            "start": {"dateTime": edited.start.isoformat(), "timeZone": self._timezone},
-            "end": {"dateTime": edited.end.isoformat(), "timeZone": self._timezone},
             "location": edited.location or "",
+            **self._event_time_body(edited.start, edited.end, edited.all_day),
         }
         # Omit recurrence to preserve the current rule; supply it to replace it.
         if edited.recurrence:
@@ -196,8 +232,21 @@ class CalendarClient:
         ).execute()
         return _to_event(item, self._timezone, event.calendar_id, event.calendar_name)
 
+    def _event_time_body(self, start: datetime, end: datetime, all_day: bool) -> dict:
+        if not all_day:
+            return {
+                "start": {"dateTime": start.isoformat(), "timeZone": self._timezone},
+                "end": {"dateTime": end.isoformat(), "timeZone": self._timezone},
+            }
+        start_date = start.date()
+        end_date = end.date()
+        if end_date <= start_date:
+            end_date = start_date + timedelta(days=1)
+        return {"start": {"date": start_date.isoformat()}, "end": {"date": end_date.isoformat()}}
+
 
 def _to_event(item: dict, timezone_name: str = "UTC", calendar_id: str | None = None, calendar_name: str | None = None) -> CalendarEvent:
+    all_day = "date" in item.get("start", {})
     start = item.get("start", {}).get("dateTime") or item.get("start", {}).get("date")
     end = item.get("end", {}).get("dateTime") or item.get("end", {}).get("date")
     calendar_timezone = ZoneInfo(timezone_name)
@@ -224,6 +273,7 @@ def _to_event(item: dict, timezone_name: str = "UTC", calendar_id: str | None = 
         recurring_event_id=item.get("recurringEventId"),
         calendar_id=calendar_id,
         calendar_name=calendar_name,
+        all_day=all_day,
     )
 
 
