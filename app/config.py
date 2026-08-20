@@ -38,6 +38,8 @@ class Settings:
     user_timezone: str
     scheduler_secret: str
     daily_agenda_hour: int
+    cron_job_api_key: str | None
+    service_base_url: str | None
 
     @property
     def timezone(self) -> ZoneInfo:
@@ -103,4 +105,6 @@ def get_settings() -> Settings:
         user_timezone=os.getenv("USER_TIMEZONE", "Asia/Singapore"),
         scheduler_secret=_required("SCHEDULER_SECRET"),
         daily_agenda_hour=daily_agenda_hour,
+        cron_job_api_key=os.getenv("CRON_JOB_API_KEY", "").strip() or None,
+        service_base_url=os.getenv("SERVICE_BASE_URL", "").strip().rstrip("/") or None,
     )

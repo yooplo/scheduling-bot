@@ -43,6 +43,20 @@ def test_explicit_all_day_event_uses_native_day_boundaries_and_label():
     assert _format_event_range(calendar_event) == "Wed 19 Aug · All day"
 
 
+def test_created_all_day_confirmation_range_does_not_show_midnight_times():
+    event = CalendarEvent(
+        event_id="all-day",
+        title="SPD offer",
+        start=datetime.fromisoformat("2026-08-21T00:00:00+08:00"),
+        end=datetime.fromisoformat("2026-08-22T00:00:00+08:00"),
+        all_day=True,
+    )
+
+    output = _format_event_range(event)
+    assert output == "Fri 21 Aug · All day"
+    assert "12:00 AM" not in output
+
+
 def test_event_listing_includes_location_when_provided():
     event = CalendarEvent(
         event_id="1", title="Dinner", location="La Pasta",

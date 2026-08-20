@@ -110,7 +110,7 @@ Before `git add`, run `git status` and make sure `.env` and `client_secret.json`
 
 1. Create an account at [Render](https://render.com/) and connect GitHub.
 2. Click **New → Blueprint**, select this repository, and approve `render.yaml`.
-3. Generate a webhook secret locally with `python -c "import secrets; print(secrets.token_urlsafe(32))"`. Enter it, along with the other values marked `sync: false`: `TELEGRAM_BOT_TOKEN`, `TELEGRAM_USER_1_ID`, `GOOGLE_USER_1_REFRESH_TOKEN`, `GROQ_API_KEY`, `GOOGLE_CLIENT_ID`, and `GOOGLE_CLIENT_SECRET`. For two people, also enter `TELEGRAM_USER_2_ID` and `GOOGLE_USER_2_REFRESH_TOKEN`. Keep the webhook secret available for the next step.
+3. Generate a webhook secret locally with `python -c "import secrets; print(secrets.token_urlsafe(32))"`. Enter it, along with the other values marked `sync: false`: `TELEGRAM_BOT_TOKEN`, `TELEGRAM_USER_1_ID`, `GOOGLE_USER_1_REFRESH_TOKEN`, `GROQ_API_KEY`, `GOOGLE_CLIENT_ID`, and `GOOGLE_CLIENT_SECRET`. For two people, also enter `TELEGRAM_USER_2_ID` and `GOOGLE_USER_2_REFRESH_TOKEN`. Set `SERVICE_BASE_URL` to the service origin after Render assigns it. Keep the webhook secret available for the next step.
 4. Deploy. Once healthy, copy its URL, for example `https://telegram-calendar-bot.onrender.com`.
 5. Register the webhook from PowerShell. Replace all placeholders; do not paste the command into a shell history if it contains your token:
 
@@ -135,11 +135,15 @@ Create an account at [cron-job.org](https://cron-job.org/). Generate `SCHEDULER_
 - Every minute: `https://YOUR-SERVICE.onrender.com/scheduled/reminders`
 - Daily at 08:00, timezone `Asia/Singapore`: `https://YOUR-SERVICE.onrender.com/scheduled/daily-agenda`
 
+In the cron-job.org Console, open **Settings → API keys**, generate an API key, and store it in Render as `CRON_JOB_API_KEY`. Set `SERVICE_BASE_URL=https://YOUR-SERVICE.onrender.com`. The bot uses the API key to create an expiring one-time job for every independent reminder; cron-job.org calls the secured `/scheduled/standalone-reminder` endpoint at the requested minute. The callback sends Telegram and deletes its job.
+
 Add custom or multiple reminders in natural language, for example: `Dentist tomorrow at 2pm, remind me 1 hour before to bring ID and 15 minutes before`.
 For an existing event, say: `Set a reminder one day before IPPT` or `add another reminder for IPPT 15 minutes before to leave now`.
 For an independent reminder, say: `remind me to pay the bill tomorrow at 9am`, `set me a reminder tonight at 11.50pm to book the court`, or `set a reminder in 15minutes to shower`.
 
-Independent reminders are not associated with an existing event. The bot creates a dedicated hidden `Telegram Reminders` secondary calendar and persists them there as private, transparent records, keeping them out of the user's normal calendar, event lists, and availability results. Each record is deleted after its Telegram notification is delivered. Event-linked and independent reminders use the same minute-by-minute scheduler and both appear under `reminders`.
+Independent reminders are not associated with an existing event and create no Google Calendar entry. Each is persisted as an expiring cron-job.org job, delivered through a secured callback, and deleted after delivery. Event-linked reminders remain in private metadata on their corresponding Calendar events. Both types appear together under `reminders`.
+
+After upgrading from the previous calendar-backed implementation, existing pending records remain deliverable and are deleted as they fire. Once no legacy reminders remain, the old `Telegram Reminders` calendar can be deleted manually from Google Calendar.
 
 ### Verified scheduler status
 

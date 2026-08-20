@@ -12,6 +12,7 @@ from fastapi import FastAPI, Header, HTTPException, Request, Response
 
 from .calendar_client import CalendarClient
 from .config import ConfigurationError, Settings, get_settings
+from .cron_client import CronJobClient
 from .models import CalendarEvent, ParsedEdit, ReminderSpec, ScheduledReminder
 from .parser import GroqParser, ParseError
 from .telegram_client import TelegramClient, valid_webhook_secret
@@ -42,10 +43,11 @@ _settings: Settings | None = None
 _telegram: TelegramClient | None = None
 _calendars: dict[int, CalendarClient] | None = None
 _parser: GroqParser | None = None
+_cron_client: CronJobClient | None = None
 
 
-def dependencies() -> tuple[Settings, TelegramClient, dict[int, CalendarClient], GroqParser]:
-    global _settings, _telegram, _calendars, _parser
+def dependencies() -> tuple[Settings, TelegramClient, dict[int, CalendarClient], GroqParser, CronJobClient | None]:
+    global _settings, _telegram, _calendars, _parser, _cron_client
     if _settings is None:
         _settings = get_settings()
         _telegram = TelegramClient(_settings.telegram_bot_token)
@@ -54,7 +56,12 @@ def dependencies() -> tuple[Settings, TelegramClient, dict[int, CalendarClient],
             for account in _settings.calendar_accounts
         }
         _parser = GroqParser(_settings.groq_api_key, _settings.groq_model)
-    return _settings, _telegram, _calendars, _parser
+        if _settings.cron_job_api_key and _settings.service_base_url:
+            _cron_client = CronJobClient(
+                _settings.cron_job_api_key, _settings.service_base_url,
+                _settings.scheduler_secret, _settings.user_timezone,
+            )
+    return _settings, _telegram, _calendars, _parser, _cron_client
 
 
 @app.get("/healthz")
@@ -65,7 +72,7 @@ async def healthz() -> dict[str, str]:
 @app.post("/webhook")
 async def webhook(request: Request, x_telegram_bot_api_secret_token: str | None = Header(default=None)) -> dict[str, bool]:
     try:
-        settings, telegram, calendars, parser = dependencies()
+        settings, telegram, calendars, parser, cron = dependencies()
     except ConfigurationError:
         logger.exception("Invalid configuration")
         raise HTTPException(status_code=503, detail="Service is not configured")
@@ -90,7 +97,7 @@ async def webhook(request: Request, x_telegram_bot_api_secret_token: str | None 
         if re.match(r"^/start(?:@\w+)?(?:\s|$)", text, flags=re.IGNORECASE):
             await telegram.send_message(chat_id, _welcome_message(first_name))
             return {"ok": True}
-        await handle_message(chat_id, text, settings, telegram, calendar, parser)
+        await handle_message(chat_id, text, settings, telegram, calendar, parser, cron)
     except Exception:
         logger.exception("Failed handling Telegram message chat_id=%s", chat_id)
         await telegram.send_message(chat_id, "Sorry, I couldn't complete that. Please try again.")
@@ -99,7 +106,7 @@ async def webhook(request: Request, x_telegram_bot_api_secret_token: str | None 
 
 @app.post("/scheduled/reminders")
 async def scheduled_reminders(authorization: str | None = Header(default=None)) -> Response:
-    settings, telegram, calendars, _ = dependencies()
+    settings, telegram, calendars, _, _ = dependencies()
     if authorization != f"Bearer {settings.scheduler_secret}":
         raise HTTPException(status_code=401, detail="Invalid scheduler secret")
     for telegram_user_id, calendar in calendars.items():
@@ -113,7 +120,7 @@ async def scheduled_reminders(authorization: str | None = Header(default=None)) 
 
 @app.post("/scheduled/daily-agenda")
 async def scheduled_daily_agenda(authorization: str | None = Header(default=None)) -> Response:
-    settings, telegram, calendars, _ = dependencies()
+    settings, telegram, calendars, _, _ = dependencies()
     if authorization != f"Bearer {settings.scheduler_secret}":
         raise HTTPException(status_code=401, detail="Invalid scheduler secret")
     for telegram_user_id, calendar in calendars.items():
@@ -123,7 +130,30 @@ async def scheduled_daily_agenda(authorization: str | None = Header(default=None
     return Response(status_code=204)
 
 
-async def handle_message(chat_id: int, text: str, settings: Settings, telegram: TelegramClient, calendar: CalendarClient, parser: GroqParser) -> None:
+@app.post("/scheduled/standalone-reminder")
+async def scheduled_standalone_reminder(request: Request, authorization: str | None = Header(default=None)) -> Response:
+    settings, telegram, calendars, _, cron = dependencies()
+    if authorization != f"Bearer {settings.scheduler_secret}":
+        raise HTTPException(status_code=401, detail="Invalid scheduler secret")
+    payload = await request.json()
+    try:
+        telegram_user_id = int(payload.get("telegram_user_id", 0))
+        job_id = int(payload.get("job_id", 0))
+    except (TypeError, ValueError):
+        raise HTTPException(status_code=400, detail="Invalid standalone reminder")
+    message = str(payload.get("message", "")).strip()
+    if telegram_user_id not in calendars or not message or not job_id:
+        raise HTTPException(status_code=400, detail="Invalid standalone reminder")
+    await telegram.send_message(telegram_user_id, f"⏰ {message}")
+    if cron:
+        try:
+            await cron.delete_reminder(job_id)
+        except Exception:
+            logger.exception("Delivered standalone reminder but could not delete cron job job_id=%s", job_id)
+    return Response(status_code=204)
+
+
+async def handle_message(chat_id: int, text: str, settings: Settings, telegram: TelegramClient, calendar: CalendarClient, parser: GroqParser, cron: CronJobClient | None = None) -> None:
     pending = pending_actions.get(chat_id)
     if pending and pending.expires_at > time.monotonic():
         selected = _selection(text, pending.events)
@@ -134,7 +164,9 @@ async def handle_message(chat_id: int, text: str, settings: Settings, telegram: 
             elif pending.action == "edit":
                 await _edit_event(chat_id, pending.request_text, selected, settings, telegram, calendar, parser)
             elif pending.action == "clear_reminder":
-                if selected.is_standalone_reminder:
+                if selected.event_id.startswith("cron:") and cron:
+                    await cron.delete_reminder(int(selected.event_id.removeprefix("cron:")))
+                elif selected.is_standalone_reminder:
                     await asyncio.to_thread(calendar.delete_event, selected)
                 else:
                     await asyncio.to_thread(calendar.clear_reminder, selected)
@@ -158,19 +190,30 @@ async def handle_message(chat_id: int, text: str, settings: Settings, telegram: 
         calendars = await asyncio.to_thread(calendar.list_calendars)
         await telegram.send_message(chat_id, _format_calendar_list(calendars))
     elif _is_standalone_reminder_request(lowered):
+        if not cron:
+            await telegram.send_message(chat_id, "Independent reminders are not configured. Add CRON_JOB_API_KEY and SERVICE_BASE_URL to the service environment.")
+            return
         standalone = await asyncio.to_thread(parser.parse_standalone_reminder, text, datetime.now(settings.timezone), settings.user_timezone)
         if standalone.confidence == "low" or standalone.due_at.tzinfo is None:
             await telegram.send_message(chat_id, "Tell me what to remind you about and when, for example: 'remind me to pay the bill tomorrow at 9am'.")
             return
-        await asyncio.to_thread(calendar.create_standalone_reminder, standalone.message, standalone.due_at)
+        await cron.create_reminder(chat_id, standalone.message, standalone.due_at)
         await telegram.send_message(chat_id, f"⏰ Reminder set: {standalone.message}\n📅 {_format_time(standalone.due_at)}")
     elif "reminder" in lowered and any(word in lowered for word in ("remove", "disable", "cancel", "delete")):
         events = await asyncio.to_thread(calendar.list_events, 30)
         events += await asyncio.to_thread(calendar.list_standalone_reminder_events, 30)
+        if cron:
+            cron_reminders = await cron.list_reminders(chat_id)
+            events += [CalendarEvent(
+                event_id=reminder.event_id, title=reminder.reminder.message or "Reminder",
+                start=reminder.due_at, end=reminder.due_at, is_standalone_reminder=True,
+            ) for reminder in cron_reminders]
         match = await asyncio.to_thread(parser.match_event, text, events)
         selected = next((event for event in events if event.event_id == match.matched_event_id), None)
         if selected and not match.ambiguous:
-            if selected.is_standalone_reminder:
+            if selected.event_id.startswith("cron:") and cron:
+                await cron.delete_reminder(int(selected.event_id.removeprefix("cron:")))
+            elif selected.is_standalone_reminder:
                 await asyncio.to_thread(calendar.delete_event, selected)
             else:
                 await asyncio.to_thread(calendar.clear_reminder, selected)
@@ -179,6 +222,9 @@ async def handle_message(chat_id: int, text: str, settings: Settings, telegram: 
         await _ask_to_select(chat_id, "clear_reminder", text, events, match, telegram)
     elif any(phrase in lowered for phrase in REMINDER_LIST_PHRASES):
         reminders = [reminder for reminder in await asyncio.to_thread(calendar.list_reminders, 30) if reminder.due_at >= datetime.now(settings.timezone)]
+        if cron:
+            reminders += [reminder for reminder in await cron.list_reminders(chat_id) if reminder.due_at >= datetime.now(settings.timezone)]
+            reminders.sort(key=lambda reminder: reminder.due_at)
         if not reminders:
             await telegram.send_message(chat_id, "No upcoming Telegram reminders.")
         else:
@@ -195,6 +241,10 @@ async def handle_message(chat_id: int, text: str, settings: Settings, telegram: 
                 await asyncio.to_thread(calendar.delete_series, series_matches[0])
                 await telegram.send_message(chat_id, f"✅ Deleted recurring series: {series_matches[0].title}")
                 return
+        exact_matches = [event for event in events if event.title.casefold() in lowered.casefold()]
+        if len(exact_matches) == 1:
+            await _delete_event(chat_id, exact_matches[0], telegram, calendar)
+            return
         match = await asyncio.to_thread(parser.match_event, text, events)
         selected = next((e for e in events if e.event_id == match.matched_event_id), None)
         if selected and not match.ambiguous:
@@ -275,7 +325,7 @@ async def handle_message(chat_id: int, text: str, settings: Settings, telegram: 
             reminder_confirmation = "\n⏰ " + _reminder_confirmation(event.reminders)
         recurrence_confirmation = "\n🔁 Repeats weekly" if event.recurrence else ""
         calendar_confirmation = f"\n🗓️ Calendar: {target_calendar.name}" if target_calendar else ""
-        await telegram.send_message(chat_id, f"✅ Added: {created.title} — {_format_time(created.start)}–{_format_time(created.end)}{calendar_confirmation}{recurrence_confirmation}{reminder_confirmation}")
+        await telegram.send_message(chat_id, f"✅ Added: {created.title} — {_format_event_range(created)}{calendar_confirmation}{recurrence_confirmation}{reminder_confirmation}")
 
 
 async def _delete_event(chat_id: int, event: CalendarEvent, telegram: TelegramClient, calendar: CalendarClient) -> None:

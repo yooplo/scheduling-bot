@@ -63,7 +63,7 @@ class CalendarClient:
             if not page_token:
                 return calendars
 
-    def _get_reminder_calendar_id(self, create: bool = False) -> str | None:
+    def _get_reminder_calendar_id(self) -> str | None:
         if getattr(self, "_reminder_calendar_id", None):
             return self._reminder_calendar_id
         page_token = None
@@ -76,19 +76,7 @@ class CalendarClient:
             page_token = result.get("nextPageToken")
             if not page_token:
                 break
-        if not create:
-            return None
-        created = self._service.calendars().insert(body={
-            "summary": REMINDER_CALENDAR_NAME,
-            "description": REMINDER_CALENDAR_MARKER,
-            "timeZone": self._timezone,
-        }).execute()
-        self._reminder_calendar_id = created["id"]
-        self._service.calendarList().patch(
-            calendarId=self._reminder_calendar_id,
-            body={"selected": False, "hidden": True},
-        ).execute()
-        return self._reminder_calendar_id
+        return None
 
     def resolve_calendar(self, name: str | None) -> CalendarInfo | None:
         if not name:
@@ -199,22 +187,6 @@ class CalendarClient:
             calendarId=existing.calendar_id or self._calendar_id, eventId=existing.event_id, body=body
         ).execute()
         return _to_event(item, self._timezone, existing.calendar_id, existing.calendar_name)
-
-    def create_standalone_reminder(self, message: str, due_at: datetime) -> CalendarEvent:
-        reminder_calendar_id = self._get_reminder_calendar_id(create=True)
-        if not reminder_calendar_id:
-            raise RuntimeError("Could not create standalone reminder calendar")
-        reminder = ReminderSpec(message=message)
-        body = {
-            "summary": "Telegram reminder",
-            "start": {"dateTime": due_at.isoformat(), "timeZone": self._timezone},
-            "end": {"dateTime": (due_at + timedelta(minutes=1)).isoformat(), "timeZone": self._timezone},
-            "transparency": "transparent",
-            "visibility": "private",
-            "extendedProperties": {"private": {"telegram_reminder_type": "standalone", "telegram_reminders": _serialize_reminders([reminder])}},
-        }
-        item = self._service.events().insert(calendarId=reminder_calendar_id, body=body).execute()
-        return _to_event(item, self._timezone, reminder_calendar_id, REMINDER_CALENDAR_NAME)
 
     def update_series(self, event: CalendarEvent, edited: ParsedEdit) -> CalendarEvent:
         """Patch a recurring-event master so the change applies to every occurrence."""

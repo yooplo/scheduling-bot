@@ -107,58 +107,6 @@ def test_list_calendars_reads_names_colours_and_default_calendar():
     assert client.resolve_calendar("Work calendar").calendar_id == "work-id"
 
 
-def test_standalone_reminder_uses_a_hidden_secondary_calendar():
-    calls = {"calendar_body": None, "calendar_patch": None, "event_calendar_id": None}
-
-    class Request:
-        def __init__(self, result):
-            self.result = result
-
-        def execute(self):
-            return self.result
-
-    class CalendarList:
-        def list(self, **kwargs):
-            return Request({"items": []})
-
-        def patch(self, **kwargs):
-            calls["calendar_patch"] = kwargs
-            return Request({})
-
-    class Calendars:
-        def insert(self, **kwargs):
-            calls["calendar_body"] = kwargs["body"]
-            return Request({"id": "reminder-calendar"})
-
-    class Events:
-        def insert(self, **kwargs):
-            calls["event_calendar_id"] = kwargs["calendarId"]
-            body = kwargs["body"]
-            return Request({"id": "reminder-event", **body})
-
-    class FakeService:
-        def calendarList(self):
-            return CalendarList()
-
-        def calendars(self):
-            return Calendars()
-
-        def events(self):
-            return Events()
-
-    client = CalendarClient.__new__(CalendarClient)
-    client._service = FakeService()
-    client._calendar_id = "primary"
-    client._timezone = "Asia/Singapore"
-    client._reminder_calendar_id = None
-
-    client.create_standalone_reminder("Shower", datetime.fromisoformat("2026-08-20T17:00:00+08:00"))
-
-    assert calls["calendar_body"]["summary"] == "Telegram Reminders"
-    assert calls["calendar_patch"]["body"] == {"selected": False, "hidden": True}
-    assert calls["event_calendar_id"] == "reminder-calendar"
-
-
 def test_delivered_standalone_reminder_is_deleted_instead_of_marked_sent():
     calls = {"deleted": None}
 

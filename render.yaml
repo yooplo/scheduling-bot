@@ -40,3 +40,7 @@ services:
         sync: false
       - key: DAILY_AGENDA_HOUR
         value: "8"
+      - key: CRON_JOB_API_KEY
+        sync: false
+      - key: SERVICE_BASE_URL
+        sync: false

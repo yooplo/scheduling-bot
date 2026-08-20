@@ -4,7 +4,7 @@
 
 A private Telegram bot that lets one or two preconfigured users manage their own Google Calendar account by sending natural-language messages. It creates, lists, edits, and deletes events; handles weekly recurrence and multiple calendars; reports availability; and delivers independent or event-linked Telegram reminders.
 
-Groq converts free text into validated structured data. Google Calendar is the persistent store for events and reminder metadata, while cron-job.org invokes the notification and daily-agenda endpoints. The service runs as a FastAPI webhook application on Render.
+Groq converts free text into validated structured data. Google Calendar stores events and event-linked reminder metadata. Independent reminders are expiring jobs managed through the cron-job.org REST API, so they create no Calendar entry. The service runs as a FastAPI webhook application on Render.
 
 ## 2. Goals / Non-Goals
 
@@ -34,12 +34,13 @@ Groq converts free text into validated structured data. Google Calendar is the p
 | Natural-language parsing | Groq API (`openai/gpt-oss-20b`) | Extract event, edit, delete, and reminder data |
 | Calendar | Google Calendar API v3, OAuth 2.0 | Multi-calendar event CRUD, calendar colours, reminder metadata, and availability data |
 | Hosting | Render free web service | Public HTTPS runtime and GitHub deployment |
-| External scheduler | cron-job.org | Minute-by-minute reminders and daily agenda delivery |
+| External scheduler | cron-job.org | Event-reminder polling, daily agenda delivery, and one-time independent reminder jobs |
 | Testing | pytest | Parser, Calendar conversion, and formatting tests |
 
 ### 3.2 Scheduled Notifications
 
-- `POST /scheduled/reminders` is called every minute by cron-job.org. It validates `SCHEDULER_SECRET`, finds due reminders for every configured user, and sends Telegram messages. Attached reminders are marked as sent in private event metadata; standalone reminder records are deleted after delivery. Events may have multiple custom Telegram reminders. Independent reminders live in a dedicated hidden secondary calendar and are excluded from normal event and availability lists.
+- `POST /scheduled/reminders` is called every minute by a fixed cron-job.org job. It validates `SCHEDULER_SECRET`, finds due event-linked reminders for every configured user, sends Telegram messages, and marks them sent in private event metadata.
+- Each independent reminder creates an expiring cron-job.org job through `CRON_JOB_API_KEY`. At its requested minute the job sends a secured `POST /scheduled/standalone-reminder` callback containing its job ID, Telegram user ID, and message. The endpoint sends Telegram and deletes the completed job. No Google Calendar event is created.
 - cron-job.org calls `POST /scheduled/daily-agenda` once daily at `DAILY_AGENDA_HOUR` in `USER_TIMEZONE`. The endpoint sends each configured user the upcoming events returned by the bot's one-day (24-hour) window.
 - Scheduler requests use an `Authorization: Bearer <SCHEDULER_SECRET>` header; direct unauthorised calls are rejected.
 - Users can add reminders while creating an event, request one for an existing event, or schedule an independent reminder. Existing-event reminders use the same event matching and disambiguation flow as edits and deletes. The `reminders` command combines both types chronologically and labels them as independent or event-linked.
@@ -56,6 +57,7 @@ Telegram (user) → Telegram webhook → Web app (FastAPI) → Router
 
 cron-job.org → /scheduled/reminders → due metadata → Telegram notification
              → /scheduled/daily-agenda → today's events → Telegram agenda
+             → /scheduled/standalone-reminder → Telegram notification → delete one-time job
 ```
 
 - **Transport**: Telegram Bot API, webhook mode (not long polling)
@@ -97,7 +99,7 @@ calendar-bot/
 | Telegram webhook | Verify incoming requests are genuine | `TELEGRAM_WEBHOOK_SECRET` |
 | Groq API | Parse natural language into structured event data | `GROQ_API_KEY` |
 | Google Calendar API | Create/list/delete events | Shared `GOOGLE_CLIENT_ID`, `GOOGLE_CLIENT_SECRET`; per-user `GOOGLE_USER_1_REFRESH_TOKEN` and optional `GOOGLE_USER_2_REFRESH_TOKEN` |
-| cron-job.org | Invoke reminders and daily agenda | Shared bearer token `SCHEDULER_SECRET` |
+| cron-job.org | Invoke reminders and daily agenda; persist independent reminders | Callback bearer token `SCHEDULER_SECRET`; REST API key `CRON_JOB_API_KEY`; public `SERVICE_BASE_URL` |
 
 All secrets are stored as environment variables on the host. `.env.example`
 documents every required variable with a placeholder value and a comment.
@@ -163,7 +165,7 @@ plain text mode to avoid formatting bugs.
 - `ReminderSpec` contains a stable reminder ID, an optional number of minutes before an event, optional custom Telegram text, and a sent flag. Multiple specs are serialized into the event's private `telegram_reminders` extended property.
 - `ParsedStandaloneReminder` contains the notification message, an absolute timezone-aware `due_at`, and parse confidence.
 - `ScheduledReminder` normalizes both reminder types for listing and delivery. It contains the due time, source calendar/event IDs, optional event title, and a `standalone` flag.
-- Independent reminders have `telegram_reminder_type=standalone`; their due time is their record start in the hidden `Telegram Reminders` calendar. Event-linked reminders are due at `event.start - minutes_before`.
+- Independent `ScheduledReminder` values are reconstructed from enabled cron-job.org jobs scoped by Telegram user ID. Event-linked reminders are due at `event.start - minutes_before`.
 
 ## 7. Command / Message Handling
 
@@ -237,9 +239,9 @@ Groq only for field extraction** — cheaper and more predictable.
 ### 8.5 Reminders, recurring events, conflicts, and free time
 - An event can have multiple attached reminders, each with optional custom Telegram text. `another`, `also`, or `additional` appends instead of replacing the current reminder metadata.
 - Reminder intent is determined before generic event creation. A due time or delay (`tonight at 11.50pm`, `tomorrow at 9am`, `in 15minutes`) creates an independent reminder. A lead time before a referenced event (`15 minutes before Dental`) invokes event matching and attaches the reminder.
-- An independent reminder is not linked to an existing event. On first use, the bot creates a dedicated `Telegram Reminders` secondary calendar and sets it to hidden and unselected. Standalone reminders are stored there as private one-minute transparent records so they survive host restarts without appearing in the user's normal calendar, event lists, or availability results. The record is deleted after successful Telegram delivery.
+- An independent reminder is not linked to an existing event and never creates a Google Calendar entry. The bot creates an enabled cron-job.org job scheduled for the requested local minute with an expiry one day later. After creation it patches the secured callback body with the returned job ID. If that patch fails, creation is rolled back by deleting the incomplete job.
 - `reminders` and equivalent phrases list unsent reminders due in the next 30 days, combining both types chronologically. Output identifies `Independent reminder` or `Event reminder`; linked entries also show the event name and lead time.
-- Removing a standalone reminder deletes its private record. Removing an event reminder clears its Telegram reminder metadata without deleting the event.
+- Removing a standalone reminder deletes its cron-job.org job. Removing an event reminder clears its Telegram reminder metadata without deleting the event.
 - The Calendar API's calendar list is used to show each accessible calendar's name and `backgroundColor` hex value. Lists, free-time checks, edits, deletes, and reminders span accessible calendars. A new event uses the default configured calendar unless its message explicitly names one; read-only calendars are never selected for insertion.
 - The scheduler checks reminder metadata every minute and sends the Telegram notification once.
 - Common weekly wording (`every Monday`) becomes a Google Calendar `RRULE:FREQ=WEEKLY;BYDAY=...` series. Recurring-series deletion removes the series master.
@@ -318,5 +320,5 @@ Groq only for field extraction** — cheaper and more predictable.
 
 - Upcoming event lists use a 7-day window; matching, conflicts, reminder management, and reminder listings use 30-day windows.
 - Pending numbered choices are held in memory for five minutes and are lost on a restart.
-- Independent reminder persistence intentionally uses private records in a dedicated hidden Google Calendar because Render's free filesystem is ephemeral.
+- Independent reminder persistence depends on the cron-job.org REST API and its account quotas (normally 100 API requests per day). Without both `CRON_JOB_API_KEY` and `SERVICE_BASE_URL`, independent reminder creation is disabled while calendar features remain available.
 - Delivery depends on cron-job.org reaching the sleeping Render service; the first request after idle may be delayed.
