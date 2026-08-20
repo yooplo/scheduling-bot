@@ -44,7 +44,7 @@ Groq converts free text into validated structured data. Google Calendar stores e
 - cron-job.org calls `POST /scheduled/daily-agenda` once daily at `DAILY_AGENDA_HOUR` in `USER_TIMEZONE`. The endpoint sends each configured user the upcoming events returned by the bot's one-day (24-hour) window.
 - Scheduler requests use an `Authorization: Bearer <SCHEDULER_SECRET>` header; direct unauthorised calls are rejected.
 - Users can add reminders while creating an event, request one for an existing event, or schedule an independent reminder. Existing-event reminders use the same event matching and disambiguation flow as edits and deletes. The `reminders` command combines both types chronologically and labels them as independent or event-linked.
-- **Deployment status:** cron-job.org reminder and daily-agenda jobs are configured and verified. Successful scheduled calls return `204 No Content`.
+- **Deployment status:** the fixed event-reminder and daily-agenda jobs are configured and verified; successful scheduled calls return `204 No Content`. Dynamically created independent-reminder jobs must be verified after `CRON_JOB_API_KEY` and `SERVICE_BASE_URL` are configured in Render.
 ```
 Telegram (user) → Telegram webhook → Web app (FastAPI) → Router
                                                               ├─ Add flow    → LLM (parse) → Google Calendar API (insert)
@@ -74,6 +74,7 @@ calendar-bot/
 ├── app/
 │   ├── main.py              # FastAPI app, /webhook route, dispatch logic
 │   ├── telegram_client.py   # Send messages, verify webhook secret
+│   ├── cron_client.py       # Create, list, and delete independent reminder jobs
 │   ├── parser.py            # Groq parsing for events, edits, matching, and reminders
 │   ├── calendar_client.py   # Multi-calendar CRUD, recurrence, and reminder metadata
 │   ├── config.py            # Loads env vars, validates required secrets
@@ -84,6 +85,7 @@ calendar-bot/
 │   ├── test_parser.py
 │   ├── test_calendar_client.py
 │   ├── test_config.py
+│   ├── test_cron_client.py
 │   └── test_event_formatting.py
 ├── requirements.txt
 ├── .env.example

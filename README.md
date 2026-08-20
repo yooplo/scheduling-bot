@@ -110,15 +110,16 @@ Before `git add`, run `git status` and make sure `.env` and `client_secret.json`
 
 1. Create an account at [Render](https://render.com/) and connect GitHub.
 2. Click **New → Blueprint**, select this repository, and approve `render.yaml`.
-3. Generate a webhook secret locally with `python -c "import secrets; print(secrets.token_urlsafe(32))"`. Enter it, along with the other values marked `sync: false`: `TELEGRAM_BOT_TOKEN`, `TELEGRAM_USER_1_ID`, `GOOGLE_USER_1_REFRESH_TOKEN`, `GROQ_API_KEY`, `GOOGLE_CLIENT_ID`, and `GOOGLE_CLIENT_SECRET`. For two people, also enter `TELEGRAM_USER_2_ID` and `GOOGLE_USER_2_REFRESH_TOKEN`. Set `SERVICE_BASE_URL` to the service origin after Render assigns it. Keep the webhook secret available for the next step.
+3. Generate a webhook secret locally with `python -c "import secrets; print(secrets.token_urlsafe(32))"`. Enter it, along with the other values marked `sync: false`: `TELEGRAM_BOT_TOKEN`, `TELEGRAM_USER_1_ID`, `GOOGLE_USER_1_REFRESH_TOKEN`, `GROQ_API_KEY`, `GOOGLE_CLIENT_ID`, and `GOOGLE_CLIENT_SECRET`. For two people, also enter `TELEGRAM_USER_2_ID` and `GOOGLE_USER_2_REFRESH_TOKEN`. Keep the webhook secret available for the next step.
 4. Deploy. Once healthy, copy its URL, for example `https://telegram-calendar-bot.onrender.com`.
-5. Register the webhook from PowerShell. Replace all placeholders; do not paste the command into a shell history if it contains your token:
+5. In Render, set `SERVICE_BASE_URL` to that origin without a trailing slash, then redeploy. Independent reminders also require `CRON_JOB_API_KEY`, configured in the scheduler section below.
+6. Register the webhook from PowerShell. Replace all placeholders; do not paste the command into a shell history if it contains your token:
 
    ```powershell
    Invoke-RestMethod -Method Post -Uri "https://api.telegram.org/bot<TELEGRAM_BOT_TOKEN>/setWebhook" -Body @{url="https://<YOUR-SERVICE>.onrender.com/webhook"; secret_token="<TELEGRAM_WEBHOOK_SECRET>"}
    ```
 
-6. Send the bot a message such as `dentist tomorrow 2-3pm`, then `list`, then a delete request to verify all flows.
+7. Send the bot a message such as `dentist tomorrow 2-3pm`, then `list`, then a delete request to verify the calendar flows.
 
 Render currently offers free Python web services, but they sleep after 15 minutes idle and can take about a minute to wake. Telegram retries failed webhook deliveries, so the bot should recover, but the first reply after idling can be delayed. Render free services also have ephemeral disks, which is why pending delete choices are intentionally short-lived in memory. See [Render's free-service limits](https://render.com/docs/free).
 
@@ -147,7 +148,9 @@ After upgrading from the previous calendar-backed implementation, existing pendi
 
 ### Verified scheduler status
 
-The cron-job.org reminder and daily-agenda jobs have been configured and verified with successful `204 No Content` responses. The reminder job runs every minute; the daily agenda runs at 8:00 AM in `Asia/Singapore`.
+The fixed cron-job.org event-reminder and daily-agenda jobs have been configured and verified with successful `204 No Content` responses. The event-reminder job runs every minute; the daily agenda runs at 8:00 AM in `Asia/Singapore`.
+
+After setting `CRON_JOB_API_KEY` and `SERVICE_BASE_URL`, verify the dynamic flow separately: create an independent reminder a few minutes ahead, confirm a new job appears in cron-job.org, receive the Telegram notification, and confirm the completed job is removed. This deployment-specific flow is not considered verified until that end-to-end check succeeds.
 
 ## Security notes
 
