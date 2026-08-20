@@ -1,7 +1,34 @@
 from datetime import datetime
 
-from app.calendar_client import CalendarClient, _serialize_reminders, _to_event
+import app.calendar_client as calendar_client_module
+from app.calendar_client import CalendarClient, _request_builder, _serialize_reminders, _to_event
 from app.models import CalendarEvent, ParsedEdit, ReminderSpec
+
+
+def test_google_requests_receive_independent_http_transports(monkeypatch):
+    transports = []
+
+    class FakeHttp:
+        pass
+
+    class FakeAuthorizedHttp:
+        def __init__(self, credentials, http):
+            transports.append(http)
+
+    class FakeRequest:
+        def __init__(self, http, *args, **kwargs):
+            self.http = http
+
+    monkeypatch.setattr(calendar_client_module.httplib2, "Http", FakeHttp)
+    monkeypatch.setattr(calendar_client_module.google_auth_httplib2, "AuthorizedHttp", FakeAuthorizedHttp)
+    monkeypatch.setattr(calendar_client_module, "HttpRequest", FakeRequest)
+
+    builder = _request_builder(object())
+    builder(None)
+    builder(None)
+
+    assert len(transports) == 2
+    assert transports[0] is not transports[1]
 
 
 def test_google_event_is_converted():

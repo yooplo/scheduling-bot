@@ -5,9 +5,12 @@ import re
 from datetime import date, datetime, time, timedelta, timezone
 from zoneinfo import ZoneInfo
 
+import google_auth_httplib2
+import httplib2
 from google.auth.transport.requests import Request
 from google.oauth2.credentials import Credentials
 from googleapiclient.discovery import build
+from googleapiclient.http import HttpRequest
 
 from .config import CalendarAccount, Settings
 from .models import CalendarEvent, CalendarInfo, ParsedEdit, ParsedEvent, ReminderSpec, ScheduledReminder
@@ -15,6 +18,15 @@ from .models import CalendarEvent, CalendarInfo, ParsedEdit, ParsedEvent, Remind
 CALENDAR_SCOPE = "https://www.googleapis.com/auth/calendar"
 REMINDER_CALENDAR_NAME = "Telegram Reminders"
 REMINDER_CALENDAR_MARKER = "SchedulingBot internal standalone reminder storage"
+
+
+def _request_builder(credentials: Credentials):
+    """Give each Google API request its own non-shared HTTP transport."""
+    def build_request(_http, *args, **kwargs):
+        authorized_http = google_auth_httplib2.AuthorizedHttp(credentials, http=httplib2.Http())
+        return HttpRequest(authorized_http, *args, **kwargs)
+
+    return build_request
 
 
 class CalendarClient:
@@ -28,7 +40,10 @@ class CalendarClient:
             scopes=[CALENDAR_SCOPE],
         )
         credentials.refresh(Request())
-        self._service = build("calendar", "v3", credentials=credentials, cache_discovery=False)
+        self._service = build(
+            "calendar", "v3", credentials=credentials, cache_discovery=False,
+            requestBuilder=_request_builder(credentials),
+        )
         self._calendar_id = account.google_calendar_id
         self._timezone = settings.user_timezone
         self._reminder_calendar_id: str | None = None
