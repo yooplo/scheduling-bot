@@ -1,7 +1,7 @@
 from datetime import datetime
 from zoneinfo import ZoneInfo
 
-from app.main import LIST_WORDS, _apply_all_day_from_text, _apply_recurrence_from_text, _calendar_colour_emoji, _date_from_text, _format_calendar_list, _format_event_listing, _format_event_range, _format_reminder_listing, _format_update_confirmation, _is_explicit_add_request, _is_series_edit, _is_standalone_reminder_request, _reminder_message_from_text, _reminder_minutes_from_text, _reminders_from_text, _unauthorised_message, _upcoming_weekday_from_text, _welcome_message
+from app.main import LIST_WORDS, _apply_all_day_from_text, _apply_recurrence_from_text, _calendar_colour_emoji, _date_from_text, _format_calendar_list, _format_event_listing, _format_event_range, _format_reminder_listing, _format_update_confirmation, _is_calendar_list_request, _is_explicit_add_request, _is_series_edit, _is_standalone_reminder_request, _reminder_message_from_text, _reminder_minutes_from_text, _reminders_from_text, _unauthorised_message, _upcoming_weekday_from_text, _welcome_message
 from app.models import ParsedEvent
 from app.models import CalendarEvent, CalendarInfo, ReminderSpec, ScheduledReminder
 
@@ -184,3 +184,14 @@ def test_calendar_colour_emoji_uses_nearest_supported_colour():
 
 def test_add_request_wins_over_calendar_list_keyword():
     assert _is_explicit_add_request("add ifg training in pickleball calendar at 7pm")
+
+
+def test_calendar_list_aliases_are_recognised():
+    for request in ("calendar", "calendars", "calendar list", "calendarslist", "/calendarslist"):
+        assert _is_calendar_list_request(request)
+
+
+def test_named_calendar_in_event_is_not_an_event_list_request():
+    request = "PE1101A Tutorial 02 on 31 Aug 2026 from 10am to 12pm at SDE1-SR1 in School calendar"
+    assert not _is_calendar_list_request(request)
+    assert not any(word in request.lower() for word in LIST_WORDS)

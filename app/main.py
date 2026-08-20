@@ -26,7 +26,7 @@ EDIT_WORDS = ("change", "edit", "move", "reschedule", "update")
 REMINDER_PREFIXES = ("set a reminder", "add a reminder", "remind me")
 REMINDER_LIST_PHRASES = ("reminders", "upcoming reminders", "all reminders", "show reminders", "my reminders")
 FREE_TIME_PHRASES = ("when am i free", "when i'm free", "find free time", "free timing", "free slot", "availability")
-LIST_WORDS = ("list", "show", "what's on", "whats on", "what are my", "upcoming", "calendar", "plan", "plans", "schedule")
+LIST_WORDS = ("list", "show", "what's on", "whats on", "what are my", "upcoming", "plan", "plans", "schedule")
 PENDING_TTL_SECONDS = 300
 
 
@@ -401,7 +401,13 @@ def _is_standalone_reminder_request(text: str) -> bool:
 
 
 def _is_calendar_list_request(text: str) -> bool:
-    return any(phrase in text for phrase in ("calendar types", "list calendars", "show calendars", "my calendars", "what calendars"))
+    normalized = re.sub(r"[^a-z]+", " ", text.lower()).strip()
+    compact = normalized.replace(" ", "")
+    return (
+        normalized in {"calendar", "calendars", "calendar list", "calendars list", "calendar types"}
+        or compact in {"calendarlist", "calendarslist"}
+        or any(phrase in normalized for phrase in ("list calendars", "show calendars", "my calendars", "what calendars"))
+    )
 
 
 def _is_explicit_add_request(text: str) -> bool:
