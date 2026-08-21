@@ -294,6 +294,17 @@ async def handle_message(chat_id: int, text: str, settings: Settings, telegram: 
             lines = [_format_event_listing(event, index=index) for index, event in enumerate(events, 1)]
             await telegram.send_message(chat_id, heading + ":\n\n" + "\n\n".join(lines))
     else:
+        if (
+            _is_explicit_add_request(lowered)
+            and _date_from_text(lowered, settings)
+            and not _has_explicit_event_time(lowered)
+            and not re.search(r"\ball[\s-]?day\b", lowered)
+        ):
+            await telegram.send_message(
+                chat_id,
+                "What time should I schedule it? Include a time, for example 'at 7pm', or say 'all day'.",
+            )
+            return
         now = datetime.now(settings.timezone)
         event = await asyncio.to_thread(parser.parse_event, text, now, settings.user_timezone)
         event.reminders = _reminders_from_text(text)
@@ -412,6 +423,16 @@ def _is_calendar_list_request(text: str) -> bool:
 
 def _is_explicit_add_request(text: str) -> bool:
     return bool(re.match(r"^(?:add|create|put)\b", text))
+
+
+def _has_explicit_event_time(text: str) -> bool:
+    """Recognize clock times without mistaking a date or location for one."""
+    lowered = text.lower()
+    return bool(
+        re.search(r"\b\d{1,2}(?::|\.)\d{2}\s*(?:am|pm)?\b", lowered)
+        or re.search(r"\b\d{1,2}\s*(?:am|pm)\b", lowered)
+        or re.search(r"\b(?:at|from)\s+\d{1,2}\s+(?:to|until|till|-)\s+\d{1,2}\b", lowered)
+    )
 
 
 def _is_series_edit(text: str, event: CalendarEvent) -> bool:

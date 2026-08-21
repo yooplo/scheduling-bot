@@ -1,7 +1,7 @@
 from datetime import datetime
 from zoneinfo import ZoneInfo
 
-from app.main import LIST_WORDS, _apply_all_day_from_text, _apply_recurrence_from_text, _calendar_colour_emoji, _date_from_text, _format_calendar_list, _format_event_listing, _format_event_range, _format_reminder_listing, _format_update_confirmation, _is_calendar_list_request, _is_explicit_add_request, _is_series_edit, _is_standalone_reminder_request, _reminder_message_from_text, _reminder_minutes_from_text, _reminders_from_text, _unauthorised_message, _upcoming_weekday_from_text, _welcome_message
+from app.main import LIST_WORDS, _apply_all_day_from_text, _apply_recurrence_from_text, _calendar_colour_emoji, _date_from_text, _format_calendar_list, _format_event_listing, _format_event_range, _format_reminder_listing, _format_update_confirmation, _has_explicit_event_time, _is_calendar_list_request, _is_explicit_add_request, _is_series_edit, _is_standalone_reminder_request, _reminder_message_from_text, _reminder_minutes_from_text, _reminders_from_text, _unauthorised_message, _upcoming_weekday_from_text, _welcome_message
 from app.models import ParsedEvent
 from app.models import CalendarEvent, CalendarInfo, ReminderSpec, ScheduledReminder
 
@@ -195,3 +195,9 @@ def test_named_calendar_in_event_is_not_an_event_list_request():
     request = "PE1101A Tutorial 02 on 31 Aug 2026 from 10am to 12pm at SDE1-SR1 in School calendar"
     assert not _is_calendar_list_request(request)
     assert not any(word in request.lower() for word in LIST_WORDS)
+
+
+def test_event_time_detection_does_not_treat_date_or_location_as_time():
+    assert not _has_explicit_event_time("add on 12 September, TDA X KAMIYO at ARK Sports Village")
+    assert _has_explicit_event_time("add on 12 September at 7pm")
+    assert _has_explicit_event_time("add on 12 September from 19:00 to 21:00")
