@@ -48,19 +48,26 @@ _cron_client: CronJobClient | None = None
 
 def dependencies() -> tuple[Settings, TelegramClient, dict[int, CalendarClient], GroqParser, CronJobClient | None]:
     global _settings, _telegram, _calendars, _parser, _cron_client
-    if _settings is None:
-        _settings = get_settings()
-        _telegram = TelegramClient(_settings.telegram_bot_token)
-        _calendars = {
-            account.telegram_user_id: CalendarClient(_settings, account)
-            for account in _settings.calendar_accounts
+    if _settings is None or _telegram is None or _calendars is None or _parser is None:
+        # Construct the complete dependency graph locally. Publishing globals
+        # one at a time leaves a poisoned partial state if OAuth or discovery
+        # initialization raises, causing later requests to receive None values.
+        settings = get_settings()
+        telegram = TelegramClient(settings.telegram_bot_token)
+        calendars = {
+            account.telegram_user_id: CalendarClient(settings, account)
+            for account in settings.calendar_accounts
         }
-        _parser = GroqParser(_settings.groq_api_key, _settings.groq_model)
-        if _settings.cron_job_api_key and _settings.service_base_url:
-            _cron_client = CronJobClient(
-                _settings.cron_job_api_key, _settings.service_base_url,
-                _settings.scheduler_secret, _settings.user_timezone,
+        parser = GroqParser(settings.groq_api_key, settings.groq_model)
+        cron_client = None
+        if settings.cron_job_api_key and settings.service_base_url:
+            cron_client = CronJobClient(
+                settings.cron_job_api_key, settings.service_base_url,
+                settings.scheduler_secret, settings.user_timezone,
             )
+        _settings, _telegram, _calendars, _parser, _cron_client = (
+            settings, telegram, calendars, parser, cron_client,
+        )
     return _settings, _telegram, _calendars, _parser, _cron_client
 
 
