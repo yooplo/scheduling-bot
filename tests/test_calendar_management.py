@@ -62,8 +62,19 @@ async def test_reminders_still_list_when_one_source_is_unavailable():
     telegram = FakeTelegram()
     settings = SimpleNamespace(timezone=ZoneInfo("Asia/Singapore"))
 
-    await handle_message(765432, "reminders", settings, telegram, FailingCalendar(), object(), WorkingCron())
+    await handle_message(765432, "/reminders", settings, telegram, FailingCalendar(), object(), WorkingCron())
 
     reply = telegram.messages[-1][1]
     assert "Pay bill" in reply
     assert "Could not retrieve: Google Calendar" in reply
+
+
+@pytest.mark.asyncio
+async def test_now_slash_command_uses_configured_timezone():
+    telegram = FakeTelegram()
+    settings = SimpleNamespace(timezone=ZoneInfo("Asia/Singapore"), user_timezone="Asia/Singapore")
+
+    await handle_message(123456, "/now@SchedulingBot", settings, telegram, object(), object())
+
+    assert telegram.messages[-1][1].startswith("🕒 ")
+    assert "Asia/Singapore" in telegram.messages[-1][1]

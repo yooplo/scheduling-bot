@@ -168,7 +168,8 @@ async def scheduled_standalone_reminder(request: Request, authorization: str | N
 
 
 async def handle_message(chat_id: int, text: str, settings: Settings, telegram: TelegramClient, calendar: CalendarClient, parser: GroqParser, cron: CronJobClient | None = None) -> None:
-    lowered = text.lower().strip()
+    command = _telegram_command(text)
+    lowered = command if command in {"reminders", "calendars", "now"} else text.lower().strip()
     pending_calendar = pending_calendar_deletions.get(chat_id)
     if pending_calendar and pending_calendar.expires_at <= time.monotonic():
         pending_calendar_deletions.pop(chat_id, None)
@@ -204,6 +205,10 @@ async def handle_message(chat_id: int, text: str, settings: Settings, telegram: 
                 await _set_reminder(chat_id, pending.request_text, selected, settings, telegram, calendar, parser)
             return
         pending_actions.pop(chat_id, None)
+    if command == "now":
+        now = datetime.now(settings.timezone)
+        await telegram.send_message(chat_id, f"🕒 {now:%A}, {now.day} {now:%B %Y} · {_format_clock(now)}\n🌏 {settings.user_timezone}")
+        return
     if calendar_name := _calendar_create_name(text):
         existing = await asyncio.to_thread(calendar.list_calendars)
         if any(item.name.casefold() == calendar_name.casefold() for item in existing):
@@ -494,6 +499,12 @@ def _is_calendar_list_request(text: str) -> bool:
     )
 
 
+def _telegram_command(text: str) -> str | None:
+    """Return a normalized Telegram slash command, including @bot suffix forms."""
+    match = re.match(r"^/([a-z][a-z0-9_]*)(?:@\w+)?(?:\s|$)", text.strip(), flags=re.IGNORECASE)
+    return match.group(1).lower() if match else None
+
+
 def _calendar_create_name(text: str) -> str | None:
     match = re.match(
         r"^(?:create|add|make)\s+(?:a\s+)?calendar(?:\s+(?:called|named))?\s+(.+?)\s*$",
@@ -620,6 +631,7 @@ def _welcome_message(first_name: str) -> str:
         "• What are my plans on 19 Aug?\n"
         "• When am I free tomorrow?\n"
         "• Remind me 30 minutes before IPPT\n\n"
+        "Commands: /reminders · /calendars · /now\n"
         "Send ‘list’ to see upcoming events."
     )
 

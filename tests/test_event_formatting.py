@@ -1,7 +1,7 @@
 from datetime import datetime
 from zoneinfo import ZoneInfo
 
-from app.main import LIST_WORDS, _apply_all_day_from_text, _apply_recurrence_from_text, _calendar_colour_emoji, _calendar_create_name, _calendar_delete_name, _chunk_section_message, _date_from_text, _format_calendar_list, _format_event_listing, _format_event_range, _format_reminder_listing, _format_update_confirmation, _has_explicit_event_time, _is_calendar_list_request, _is_explicit_add_request, _is_series_edit, _is_standalone_reminder_request, _reminder_message_from_text, _reminder_minutes_from_text, _reminders_from_text, _unauthorised_message, _upcoming_weekday_from_text, _welcome_message
+from app.main import LIST_WORDS, _apply_all_day_from_text, _apply_recurrence_from_text, _calendar_colour_emoji, _calendar_create_name, _calendar_delete_name, _chunk_section_message, _date_from_text, _format_calendar_list, _format_event_listing, _format_event_range, _format_reminder_listing, _format_update_confirmation, _has_explicit_event_time, _is_calendar_list_request, _is_explicit_add_request, _is_series_edit, _is_standalone_reminder_request, _reminder_message_from_text, _reminder_minutes_from_text, _reminders_from_text, _telegram_command, _unauthorised_message, _upcoming_weekday_from_text, _welcome_message
 from app.models import ParsedEvent
 from app.models import CalendarEvent, CalendarInfo, ReminderSpec, ScheduledReminder
 
@@ -101,6 +101,7 @@ def test_explicit_date_is_extracted_from_free_time_query():
 
 def test_welcome_message_uses_telegram_first_name():
     assert _welcome_message("Justin").startswith("Hi Justin! 👋")
+    assert "/reminders" in _welcome_message("Justin")
 
 
 def test_singular_plan_is_a_list_intent():
@@ -214,3 +215,10 @@ def test_long_structured_messages_are_split_below_telegram_limit():
     chunks = _chunk_section_message("Upcoming reminders:", ["x" * 1000 for _ in range(10)])
     assert len(chunks) > 1
     assert all(len(chunk) <= 3900 for chunk in chunks)
+
+
+def test_telegram_slash_commands_support_bot_username_suffixes():
+    assert _telegram_command("/reminders") == "reminders"
+    assert _telegram_command("/calendars@SchedulingBot") == "calendars"
+    assert _telegram_command("/NOW") == "now"
+    assert _telegram_command("reminders") is None

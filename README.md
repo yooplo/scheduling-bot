@@ -17,6 +17,9 @@ All requests use `USER_TIMEZONE` (normally `Asia/Singapore`).
 | Add an independent reminder | `remind me to pay the bill tomorrow at 9am`, `set me a reminder tonight at 11.50pm to book the court`, or `set a reminder in 15minutes to shower` |
 | Add a recurring event | `Gym every Monday at 8pm` |
 | Start the bot | `/start` — receives a personalised welcome and examples |
+| List reminders | `/reminders` |
+| List calendars | `/calendars` |
+| Show current local time | `/now` |
 | List the next 7 days | `list`, `upcoming`, or `schedule` |
 | List a specific day | `what are my plans on 19 Aug?` |
 | List the next named weekday | `what are my plans on Monday?` |
@@ -42,6 +45,14 @@ Free-time results cover the full day, from 12:00 AM through 11:59 PM, and show s
 Messages that explicitly say `all day` create native Google Calendar all-day events using date-only boundaries, rather than timed events from 12:00 AM to 11:59 PM. Multi-day all-day events use Google's exclusive end-date convention.
 
 Calendar deletion requires confirmation within five minutes. The bot refuses to delete the primary Google Calendar or a shared calendar the user does not own.
+
+To expose the slash-command menu in Telegram, send `/setcommands` to BotFather and enter:
+
+```text
+reminders - Shows all upcoming reminders
+calendars - Shows the list of calendars
+now - Tells you the date and time now
+```
 
 Reminder wording determines whether a notification is independent or event-linked:
 

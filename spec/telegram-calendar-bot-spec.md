@@ -195,6 +195,9 @@ language and routed by intent:
 | "calendar types" / "show my calendars" | list accessible calendars and their colours |
 | "Team meeting tomorrow 2pm in Work calendar" | add to the named writable calendar |
 | `/start` | personalised welcome message with usage examples |
+| `/reminders` | list upcoming reminders |
+| `/calendars` | list accessible calendars and colours |
+| `/now` | show the current date and time in `USER_TIMEZONE` |
 | Reply to a pending disambiguation (`2` or `second`) | resolve pending delete, edit, reminder attachment, or reminder removal |
 
 Intent detection can be a single Groq call that returns `action` as
