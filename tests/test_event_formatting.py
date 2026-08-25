@@ -207,8 +207,14 @@ def test_event_time_detection_does_not_treat_date_or_location_as_time():
 def test_calendar_management_commands_extract_names_without_matching_events():
     assert _calendar_create_name("create calendar School") == "School"
     assert _calendar_create_name("add a calendar named 'Pickleball'") == "Pickleball"
+    assert _calendar_create_name("add test calender") == "test"
+    assert _calendar_create_name("create School calendar") == "School"
+    assert _calendar_create_name("make a new calendar called Work") == "Work"
     assert _calendar_delete_name("delete calendar School") == "School"
+    assert _calendar_delete_name("delete School calendar") == "School"
+    assert _calendar_delete_name("remove my Work calender") == "Work"
     assert _calendar_create_name("add meeting tomorrow at 2pm in School calendar") is None
+    assert _calendar_delete_name("remove dentist tomorrow from Work calendar") is None
 
 
 def test_long_structured_messages_are_split_below_telegram_limit():

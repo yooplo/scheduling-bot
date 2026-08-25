@@ -24,8 +24,8 @@ All requests use `USER_TIMEZONE` (normally `Asia/Singapore`).
 | List a specific day | `what are my plans on 19 Aug?` |
 | List the next named weekday | `what are my plans on Monday?` |
 | Show calendar types/colours | `calendar types` or `show my calendars` (closest colour-square emoji) |
-| Create a calendar | `create calendar School` or `add a calendar named School` |
-| Delete a calendar | `delete calendar School`, then `confirm delete calendar` |
+| Create a calendar | `create calendar School`, `add a calendar named School`, or `add School calendar` |
+| Delete a calendar | `delete calendar School` or `remove School calendar`, then `confirm delete calendar` |
 | Add to a specific calendar | `Team meeting tomorrow 2pm in Work calendar` |
 | List today/tomorrow | `plans tmr`, `what are my plans tomorrow?`, or `show my schedule today` |
 | Find availability | `when am I free tmr?` or `find free time this week` |

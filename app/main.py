@@ -506,19 +506,41 @@ def _telegram_command(text: str) -> str | None:
 
 
 def _calendar_create_name(text: str) -> str | None:
-    match = re.match(
-        r"^(?:create|add|make)\s+(?:a\s+)?calendar(?:\s+(?:called|named))?\s+(.+?)\s*$",
-        text, flags=re.IGNORECASE,
-    )
-    return _clean_calendar_name(match.group(1)) if match else None
+    return _calendar_name_from_command(text, r"create|add|make", r"a(?:\s+new)?|new")
 
 
 def _calendar_delete_name(text: str) -> str | None:
-    match = re.match(
-        r"^(?:delete|remove)\s+(?:the\s+)?calendar(?:\s+(?:called|named))?\s+(.+?)\s*$",
+    return _calendar_name_from_command(text, r"delete|remove", r"the|my")
+
+
+def _calendar_name_from_command(text: str, verbs: str, determiner: str) -> str | None:
+    prefix = re.match(
+        rf"^(?:{verbs})\s+(?:(?:{determiner})\s+)?calend[ae]r(?:\s+(?:called|named))?\s+(.+?)\s*$",
         text, flags=re.IGNORECASE,
     )
-    return _clean_calendar_name(match.group(1)) if match else None
+    if prefix:
+        return _clean_calendar_name(prefix.group(1))
+
+    suffix = re.match(
+        rf"^(?:{verbs})\s+(?:(?:{determiner})\s+)?(.+?)\s+calend[ae]r\s*$",
+        text, flags=re.IGNORECASE,
+    )
+    if not suffix:
+        return None
+    candidate = suffix.group(1).strip()
+    # Suffix wording is inherently more ambiguous. Do not reinterpret an
+    # event request such as "add meeting tomorrow in School calendar" as a
+    # request to create a calendar with the entire event text as its name.
+    if len(candidate.split()) > 6 or re.search(
+        r"\b(?:in|on|at|from|tomorrow|today|tonight|every|"
+        r"monday|tuesday|wednesday|thursday|friday|saturday|sunday|"
+        r"jan(?:uary)?|feb(?:ruary)?|mar(?:ch)?|apr(?:il)?|jun(?:e)?|"
+        r"jul(?:y)?|aug(?:ust)?|sep(?:t(?:ember)?)?|oct(?:ober)?|nov(?:ember)?|dec(?:ember)?|"
+        r"\d{1,2}(?::|\.)\d{2}|\d{1,2}\s*(?:am|pm))\b",
+        candidate, flags=re.IGNORECASE,
+    ):
+        return None
+    return _clean_calendar_name(candidate)
 
 
 def _clean_calendar_name(name: str) -> str | None:
