@@ -77,7 +77,8 @@ class CronJobClient:
         prefix = f"{self.TITLE_PREFIX}{telegram_user_id}:"
         reminders: list[ScheduledReminder] = []
         for job in jobs:
-            if not job.get("enabled") or not job.get("title", "").startswith(prefix):
+            title = job.get("title")
+            if not job.get("enabled") or not isinstance(title, str) or not title.startswith(prefix):
                 continue
             schedule = job.get("schedule", {})
             try:
@@ -92,11 +93,13 @@ class CronJobClient:
                     )
             except (KeyError, IndexError, TypeError, ValueError):
                 continue
-            message = job["title"][len(prefix):] or "Reminder"
-            reminders.append(ScheduledReminder(
-                event_id=f"cron:{job['jobId']}", reminder=ReminderSpec(message=message),
-                due_at=due_at, standalone=True,
-            ))
+            try:
+                reminders.append(ScheduledReminder(
+                    event_id=f"cron:{int(job['jobId'])}", reminder=ReminderSpec(message=title[len(prefix):] or "Reminder"),
+                    due_at=due_at, standalone=True,
+                ))
+            except (KeyError, TypeError, ValueError):
+                continue
         return sorted(reminders, key=lambda item: item.due_at)
 
     async def delete_reminder(self, job_id: int) -> None:

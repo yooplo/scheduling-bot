@@ -21,6 +21,8 @@ All requests use `USER_TIMEZONE` (normally `Asia/Singapore`).
 | List a specific day | `what are my plans on 19 Aug?` |
 | List the next named weekday | `what are my plans on Monday?` |
 | Show calendar types/colours | `calendar types` or `show my calendars` (closest colour-square emoji) |
+| Create a calendar | `create calendar School` or `add a calendar named School` |
+| Delete a calendar | `delete calendar School`, then `confirm delete calendar` |
 | Add to a specific calendar | `Team meeting tomorrow 2pm in Work calendar` |
 | List today/tomorrow | `plans tmr`, `what are my plans tomorrow?`, or `show my schedule today` |
 | Find availability | `when am I free tmr?` or `find free time this week` |
@@ -38,6 +40,8 @@ The bot warns before creating an event that overlaps an upcoming event. To delib
 Free-time results cover the full day, from 12:00 AM through 11:59 PM, and show slots of at least one hour. They include events from every calendar the user can view. New events go to the configured default calendar unless a writable named calendar is explicitly specified.
 
 Messages that explicitly say `all day` create native Google Calendar all-day events using date-only boundaries, rather than timed events from 12:00 AM to 11:59 PM. Multi-day all-day events use Google's exclusive end-date convention.
+
+Calendar deletion requires confirmation within five minutes. The bot refuses to delete the primary Google Calendar or a shared calendar the user does not own.
 
 Reminder wording determines whether a notification is independent or event-linked:
 

@@ -64,6 +64,22 @@ class CalendarClient:
     def list_calendars(self) -> list[CalendarInfo]:
         return self._list_calendars(show_hidden=False)
 
+    def create_calendar(self, name: str) -> CalendarInfo:
+        item = self._service.calendars().insert(
+            body={"summary": name, "timeZone": self._timezone},
+        ).execute()
+        return CalendarInfo(
+            calendar_id=item["id"], name=item.get("summary") or name,
+            background_color=item.get("backgroundColor"), access_role="owner",
+        )
+
+    def delete_calendar(self, calendar: CalendarInfo) -> None:
+        if calendar.primary:
+            raise ValueError("The primary calendar cannot be deleted")
+        if calendar.access_role != "owner":
+            raise PermissionError("Only an owned calendar can be deleted")
+        self._service.calendars().delete(calendarId=calendar.calendar_id).execute()
+
     def _list_calendars(self, show_hidden: bool) -> list[CalendarInfo]:
         calendars: list[CalendarInfo] = []
         page_token = None

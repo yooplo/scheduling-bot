@@ -1,8 +1,9 @@
 from datetime import datetime
 
 import app.calendar_client as calendar_client_module
+import pytest
 from app.calendar_client import CalendarClient, _request_builder, _serialize_reminders, _to_event
-from app.models import CalendarEvent, ParsedEdit, ReminderSpec
+from app.models import CalendarEvent, CalendarInfo, ParsedEdit, ReminderSpec
 
 
 def test_google_requests_receive_independent_http_transports(monkeypatch):
@@ -132,6 +133,48 @@ def test_list_calendars_reads_names_colours_and_default_calendar():
     assert [(calendar.name, calendar.background_color) for calendar in calendars] == [("My calendar", "#4285f4"), ("Work", "#a4bdfc")]
     assert client.resolve_calendar("work").calendar_id == "work-id"
     assert client.resolve_calendar("Work calendar").calendar_id == "work-id"
+
+
+def test_create_and_delete_owned_secondary_calendar():
+    calls = {}
+
+    class Request:
+        def __init__(self, result=None):
+            self.result = result or {}
+
+        def execute(self):
+            return self.result
+
+    class Calendars:
+        def insert(self, **kwargs):
+            calls["insert"] = kwargs
+            return Request({"id": "school-id", "summary": "School"})
+
+        def delete(self, **kwargs):
+            calls["delete"] = kwargs
+            return Request()
+
+    class FakeService:
+        def calendars(self):
+            return Calendars()
+
+    client = CalendarClient.__new__(CalendarClient)
+    client._service = FakeService()
+    client._timezone = "Asia/Singapore"
+
+    created = client.create_calendar("School")
+    client.delete_calendar(created)
+
+    assert calls["insert"] == {"body": {"summary": "School", "timeZone": "Asia/Singapore"}}
+    assert calls["delete"] == {"calendarId": "school-id"}
+
+
+def test_primary_or_unowned_calendar_cannot_be_deleted():
+    client = CalendarClient.__new__(CalendarClient)
+    with pytest.raises(ValueError, match="primary"):
+        client.delete_calendar(CalendarInfo(calendar_id="primary", name="Main", primary=True, access_role="owner"))
+    with pytest.raises(PermissionError, match="owned"):
+        client.delete_calendar(CalendarInfo(calendar_id="shared", name="Shared", access_role="reader"))
 
 
 def test_delivered_standalone_reminder_is_deleted_instead_of_marked_sent():

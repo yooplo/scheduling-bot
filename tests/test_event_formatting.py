@@ -1,7 +1,7 @@
 from datetime import datetime
 from zoneinfo import ZoneInfo
 
-from app.main import LIST_WORDS, _apply_all_day_from_text, _apply_recurrence_from_text, _calendar_colour_emoji, _date_from_text, _format_calendar_list, _format_event_listing, _format_event_range, _format_reminder_listing, _format_update_confirmation, _has_explicit_event_time, _is_calendar_list_request, _is_explicit_add_request, _is_series_edit, _is_standalone_reminder_request, _reminder_message_from_text, _reminder_minutes_from_text, _reminders_from_text, _unauthorised_message, _upcoming_weekday_from_text, _welcome_message
+from app.main import LIST_WORDS, _apply_all_day_from_text, _apply_recurrence_from_text, _calendar_colour_emoji, _calendar_create_name, _calendar_delete_name, _chunk_section_message, _date_from_text, _format_calendar_list, _format_event_listing, _format_event_range, _format_reminder_listing, _format_update_confirmation, _has_explicit_event_time, _is_calendar_list_request, _is_explicit_add_request, _is_series_edit, _is_standalone_reminder_request, _reminder_message_from_text, _reminder_minutes_from_text, _reminders_from_text, _unauthorised_message, _upcoming_weekday_from_text, _welcome_message
 from app.models import ParsedEvent
 from app.models import CalendarEvent, CalendarInfo, ReminderSpec, ScheduledReminder
 
@@ -201,3 +201,16 @@ def test_event_time_detection_does_not_treat_date_or_location_as_time():
     assert not _has_explicit_event_time("add on 12 September, TDA X KAMIYO at ARK Sports Village")
     assert _has_explicit_event_time("add on 12 September at 7pm")
     assert _has_explicit_event_time("add on 12 September from 19:00 to 21:00")
+
+
+def test_calendar_management_commands_extract_names_without_matching_events():
+    assert _calendar_create_name("create calendar School") == "School"
+    assert _calendar_create_name("add a calendar named 'Pickleball'") == "Pickleball"
+    assert _calendar_delete_name("delete calendar School") == "School"
+    assert _calendar_create_name("add meeting tomorrow at 2pm in School calendar") is None
+
+
+def test_long_structured_messages_are_split_below_telegram_limit():
+    chunks = _chunk_section_message("Upcoming reminders:", ["x" * 1000 for _ in range(10)])
+    assert len(chunks) > 1
+    assert all(len(chunk) <= 3900 for chunk in chunks)

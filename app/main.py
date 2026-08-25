@@ -13,7 +13,7 @@ from fastapi import FastAPI, Header, HTTPException, Request, Response
 from .calendar_client import CalendarClient
 from .config import ConfigurationError, Settings, get_settings
 from .cron_client import CronJobClient
-from .models import CalendarEvent, ParsedEdit, ReminderSpec, ScheduledReminder
+from .models import CalendarEvent, CalendarInfo, ParsedEdit, ReminderSpec, ScheduledReminder
 from .parser import GroqParser, ParseError
 from .telegram_client import TelegramClient, valid_webhook_secret
 
@@ -38,7 +38,14 @@ class PendingAction:
     request_text: str
 
 
+@dataclass
+class PendingCalendarDeletion:
+    calendar: CalendarInfo
+    expires_at: float
+
+
 pending_actions: dict[int, PendingAction] = {}
+pending_calendar_deletions: dict[int, PendingCalendarDeletion] = {}
 _settings: Settings | None = None
 _telegram: TelegramClient | None = None
 _calendars: dict[int, CalendarClient] | None = None
@@ -161,6 +168,21 @@ async def scheduled_standalone_reminder(request: Request, authorization: str | N
 
 
 async def handle_message(chat_id: int, text: str, settings: Settings, telegram: TelegramClient, calendar: CalendarClient, parser: GroqParser, cron: CronJobClient | None = None) -> None:
+    lowered = text.lower().strip()
+    pending_calendar = pending_calendar_deletions.get(chat_id)
+    if pending_calendar and pending_calendar.expires_at <= time.monotonic():
+        pending_calendar_deletions.pop(chat_id, None)
+        pending_calendar = None
+    if pending_calendar and lowered in {"confirm delete calendar", "/confirm_delete_calendar"}:
+        pending_calendar_deletions.pop(chat_id, None)
+        await asyncio.to_thread(calendar.delete_calendar, pending_calendar.calendar)
+        await telegram.send_message(chat_id, f"✅ Deleted calendar: {pending_calendar.calendar.name}")
+        return
+    if pending_calendar and lowered in {"cancel", "cancel delete calendar", "/cancel"}:
+        pending_calendar_deletions.pop(chat_id, None)
+        await telegram.send_message(chat_id, "Calendar deletion cancelled.")
+        return
+
     pending = pending_actions.get(chat_id)
     if pending and pending.expires_at > time.monotonic():
         selected = _selection(text, pending.events)
@@ -182,8 +204,32 @@ async def handle_message(chat_id: int, text: str, settings: Settings, telegram: 
                 await _set_reminder(chat_id, pending.request_text, selected, settings, telegram, calendar, parser)
             return
         pending_actions.pop(chat_id, None)
-    lowered = text.lower()
-    if any(phrase in lowered for phrase in FREE_TIME_PHRASES):
+    if calendar_name := _calendar_create_name(text):
+        existing = await asyncio.to_thread(calendar.list_calendars)
+        if any(item.name.casefold() == calendar_name.casefold() for item in existing):
+            await telegram.send_message(chat_id, f"A calendar named '{calendar_name}' already exists.")
+            return
+        created_calendar = await asyncio.to_thread(calendar.create_calendar, calendar_name)
+        await telegram.send_message(chat_id, f"✅ Created calendar: {created_calendar.name}")
+    elif calendar_name := _calendar_delete_name(text):
+        target_calendar = await asyncio.to_thread(calendar.resolve_calendar, calendar_name)
+        if target_calendar is None:
+            await telegram.send_message(chat_id, f"I couldn't find a calendar named '{calendar_name}'. Send 'calendars' to see available calendars.")
+            return
+        if target_calendar.primary:
+            await telegram.send_message(chat_id, "The primary Google Calendar cannot be deleted.")
+            return
+        if target_calendar.access_role != "owner":
+            await telegram.send_message(chat_id, f"You do not own {target_calendar.name}, so I cannot delete it.")
+            return
+        pending_calendar_deletions[chat_id] = PendingCalendarDeletion(
+            target_calendar, time.monotonic() + PENDING_TTL_SECONDS,
+        )
+        await telegram.send_message(
+            chat_id,
+            f"⚠️ Delete the entire calendar '{target_calendar.name}' and all of its events? Reply 'confirm delete calendar' within 5 minutes, or 'cancel'.",
+        )
+    elif any(phrase in lowered for phrase in FREE_TIME_PHRASES):
         tomorrow = "tomorrow" in lowered or "tmr" in lowered
         explicit_day = _date_from_text(lowered, settings)
         if tomorrow or explicit_day:
@@ -228,15 +274,35 @@ async def handle_message(chat_id: int, text: str, settings: Settings, telegram: 
             return
         await _ask_to_select(chat_id, "clear_reminder", text, events, match, telegram)
     elif any(phrase in lowered for phrase in REMINDER_LIST_PHRASES):
-        reminders = [reminder for reminder in await asyncio.to_thread(calendar.list_reminders, 30) if reminder.due_at >= datetime.now(settings.timezone)]
+        now = datetime.now(settings.timezone)
+        reminders = []
+        unavailable_sources = []
+        try:
+            reminders.extend(
+                reminder for reminder in await asyncio.to_thread(calendar.list_reminders, 30)
+                if reminder.due_at >= now
+            )
+        except Exception:
+            unavailable_sources.append("Google Calendar")
+            logger.exception("Could not list Google Calendar reminders chat_id=%s", chat_id)
         if cron:
-            reminders += [reminder for reminder in await cron.list_reminders(chat_id) if reminder.due_at >= datetime.now(settings.timezone)]
-            reminders.sort(key=lambda reminder: reminder.due_at)
+            try:
+                reminders.extend(reminder for reminder in await cron.list_reminders(chat_id) if reminder.due_at >= now)
+            except Exception:
+                unavailable_sources.append("independent reminders")
+                logger.exception("Could not list cron-job.org reminders chat_id=%s", chat_id)
+        reminders.sort(key=lambda reminder: reminder.due_at)
         if not reminders:
-            await telegram.send_message(chat_id, "No upcoming Telegram reminders.")
+            if unavailable_sources:
+                sources = " and ".join(unavailable_sources)
+                await telegram.send_message(chat_id, f"I couldn't retrieve {sources} right now. Please try again shortly.")
+            else:
+                await telegram.send_message(chat_id, "No upcoming Telegram reminders.")
         else:
             lines = [_format_reminder_listing(reminder, index) for index, reminder in enumerate(reminders, 1)]
-            await telegram.send_message(chat_id, "Upcoming reminders:\n\n" + "\n\n".join(lines))
+            footer = f"⚠️ Could not retrieve: {', '.join(unavailable_sources)}." if unavailable_sources else None
+            for message in _chunk_section_message("Upcoming reminders:", lines, footer):
+                await telegram.send_message(chat_id, message)
     elif any(word in lowered for word in DELETE_WORDS):
         events = await asyncio.to_thread(calendar.list_events, 30)
         if not events:
@@ -426,6 +492,27 @@ def _is_calendar_list_request(text: str) -> bool:
         or compact in {"calendarlist", "calendarslist"}
         or any(phrase in normalized for phrase in ("list calendars", "show calendars", "my calendars", "what calendars"))
     )
+
+
+def _calendar_create_name(text: str) -> str | None:
+    match = re.match(
+        r"^(?:create|add|make)\s+(?:a\s+)?calendar(?:\s+(?:called|named))?\s+(.+?)\s*$",
+        text, flags=re.IGNORECASE,
+    )
+    return _clean_calendar_name(match.group(1)) if match else None
+
+
+def _calendar_delete_name(text: str) -> str | None:
+    match = re.match(
+        r"^(?:delete|remove)\s+(?:the\s+)?calendar(?:\s+(?:called|named))?\s+(.+?)\s*$",
+        text, flags=re.IGNORECASE,
+    )
+    return _clean_calendar_name(match.group(1)) if match else None
+
+
+def _clean_calendar_name(name: str) -> str | None:
+    cleaned = name.strip().strip("\"'").strip()
+    return cleaned[:300] or None
 
 
 def _is_explicit_add_request(text: str) -> bool:
@@ -628,6 +715,28 @@ def _format_reminder_listing(reminder: ScheduledReminder, index: int) -> str:
     minutes = reminder.reminder.minutes_before or 0
     unit = "minute" if minutes == 1 else "minutes"
     return f"{index}. {text}\n   🔗 Event reminder\n   ⏰ {_format_time(reminder.due_at)} ({minutes} {unit} before)\n   📅 {reminder.event_title}"
+
+
+def _chunk_section_message(heading: str, sections: list[str], footer: str | None = None, limit: int = 3900) -> list[str]:
+    """Keep structured Telegram replies below the platform message limit."""
+    chunks = []
+    current = heading
+    for section in sections:
+        candidate = current + "\n\n" + section
+        if len(candidate) <= limit:
+            current = candidate
+            continue
+        chunks.append(current)
+        current = heading + " (continued):\n\n" + section
+    if footer:
+        candidate = current + "\n\n" + footer
+        if len(candidate) <= limit:
+            current = candidate
+        else:
+            chunks.append(current)
+            current = footer
+    chunks.append(current)
+    return chunks
 
 
 def _reminder_confirmation(reminders: list[ReminderSpec]) -> str:
