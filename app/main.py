@@ -13,7 +13,7 @@ from fastapi import FastAPI, Header, HTTPException, Request, Response
 from .calendar_client import CalendarClient
 from .config import ConfigurationError, Settings, get_settings
 from .cron_client import CronJobClient
-from .models import CalendarEvent, CalendarInfo, ParsedEdit, ReminderSpec, ScheduledReminder
+from .models import CalendarEvent, CalendarInfo, ParsedEdit, ParsedEvent, ReminderSpec, ScheduledReminder
 from .parser import GroqParser, ParseError
 from .telegram_client import TelegramClient, valid_webhook_secret
 
@@ -44,8 +44,15 @@ class PendingCalendarDeletion:
     expires_at: float
 
 
+@dataclass
+class PendingReminderList:
+    reminders: list[ScheduledReminder]
+    expires_at: float
+
+
 pending_actions: dict[int, PendingAction] = {}
 pending_calendar_deletions: dict[int, PendingCalendarDeletion] = {}
+recent_reminder_lists: dict[int, PendingReminderList] = {}
 _settings: Settings | None = None
 _telegram: TelegramClient | None = None
 _calendars: dict[int, CalendarClient] | None = None
@@ -170,6 +177,25 @@ async def scheduled_standalone_reminder(request: Request, authorization: str | N
 async def handle_message(chat_id: int, text: str, settings: Settings, telegram: TelegramClient, calendar: CalendarClient, parser: GroqParser, cron: CronJobClient | None = None) -> None:
     command = _telegram_command(text)
     lowered = command if command in {"reminders", "calendars", "now"} else text.lower().strip()
+    recent_reminders = recent_reminder_lists.get(chat_id)
+    if recent_reminders and recent_reminders.expires_at <= time.monotonic():
+        recent_reminder_lists.pop(chat_id, None)
+        recent_reminders = None
+    numbered_removal = re.fullmatch(r"(?:remove|delete|cancel)\s+([1-9]\d*)", lowered)
+    if recent_reminders and numbered_removal:
+        index = int(numbered_removal.group(1)) - 1
+        if index >= len(recent_reminders.reminders):
+            await telegram.send_message(chat_id, f"Choose a reminder number from 1 to {len(recent_reminders.reminders)}.")
+            return
+        selected_reminder = recent_reminders.reminders[index]
+        recent_reminder_lists.pop(chat_id, None)
+        await _remove_scheduled_reminder(selected_reminder, calendar, cron)
+        label = selected_reminder.reminder.message or selected_reminder.event_title or "Reminder"
+        await telegram.send_message(chat_id, f"🔕 Reminder removed: {label}")
+        return
+    if recent_reminders and not any(phrase in lowered for phrase in REMINDER_LIST_PHRASES):
+        recent_reminder_lists.pop(chat_id, None)
+
     pending_calendar = pending_calendar_deletions.get(chat_id)
     if pending_calendar and pending_calendar.expires_at <= time.monotonic():
         pending_calendar_deletions.pop(chat_id, None)
@@ -251,7 +277,9 @@ async def handle_message(chat_id: int, text: str, settings: Settings, telegram: 
         if not cron:
             await telegram.send_message(chat_id, "Independent reminders are not configured. Add CRON_JOB_API_KEY and SERVICE_BASE_URL to the service environment.")
             return
-        standalone = await asyncio.to_thread(parser.parse_standalone_reminder, text, datetime.now(settings.timezone), settings.user_timezone)
+        now = datetime.now(settings.timezone)
+        standalone = await asyncio.to_thread(parser.parse_standalone_reminder, text, now, settings.user_timezone)
+        _apply_standalone_clock_from_text(standalone, text, now)
         if standalone.confidence == "low" or standalone.due_at.tzinfo is None:
             await telegram.send_message(chat_id, "Tell me what to remind you about and when, for example: 'remind me to pay the bill tomorrow at 9am'.")
             return
@@ -298,12 +326,16 @@ async def handle_message(chat_id: int, text: str, settings: Settings, telegram: 
                 logger.exception("Could not list cron-job.org reminders chat_id=%s", chat_id)
         reminders.sort(key=lambda reminder: reminder.due_at)
         if not reminders:
+            recent_reminder_lists.pop(chat_id, None)
             if unavailable_sources:
                 sources = " and ".join(unavailable_sources)
                 await telegram.send_message(chat_id, f"I couldn't retrieve {sources} right now. Please try again shortly.")
             else:
                 await telegram.send_message(chat_id, "No upcoming Telegram reminders.")
         else:
+            recent_reminder_lists[chat_id] = PendingReminderList(
+                reminders, time.monotonic() + PENDING_TTL_SECONDS,
+            )
             lines = [_format_reminder_listing(reminder, index) for index, reminder in enumerate(reminders, 1)]
             footer = f"⚠️ Could not retrieve: {', '.join(unavailable_sources)}." if unavailable_sources else None
             for message in _chunk_section_message("Upcoming reminders:", lines, footer):
@@ -384,7 +416,9 @@ async def handle_message(chat_id: int, text: str, settings: Settings, telegram: 
             )
             return
         now = datetime.now(settings.timezone)
-        event = await asyncio.to_thread(parser.parse_event, text, now, settings.user_timezone)
+        event = _explicit_all_day_event(text, settings) or await asyncio.to_thread(
+            parser.parse_event, _event_parser_text(text), now, settings.user_timezone,
+        )
         event.reminders = _reminders_from_text(text)
         if not event.reminders and event.reminder_minutes:
             event.reminders = [ReminderSpec(minutes_before=event.reminder_minutes, message=_reminder_message_from_text(text))]
@@ -420,6 +454,27 @@ async def handle_message(chat_id: int, text: str, settings: Settings, telegram: 
 async def _delete_event(chat_id: int, event: CalendarEvent, telegram: TelegramClient, calendar: CalendarClient) -> None:
     await asyncio.to_thread(calendar.delete_event, event)
     await telegram.send_message(chat_id, f"✅ Deleted: {event.title} — {_format_time(event.start)}")
+
+
+async def _remove_scheduled_reminder(reminder: ScheduledReminder, calendar: CalendarClient, cron: CronJobClient | None) -> None:
+    if reminder.event_id.startswith("cron:"):
+        if not cron:
+            raise RuntimeError("Independent reminders are not configured")
+        await cron.delete_reminder(int(reminder.event_id.removeprefix("cron:")))
+    elif reminder.standalone:
+        await asyncio.to_thread(calendar.delete_event, CalendarEvent(
+            event_id=reminder.event_id,
+            title=reminder.reminder.message or "Reminder",
+            start=reminder.due_at,
+            end=reminder.due_at,
+            calendar_id=reminder.calendar_id,
+            is_standalone_reminder=True,
+        ))
+    else:
+        await asyncio.to_thread(
+            calendar.remove_reminder,
+            reminder.event_id, reminder.reminder.reminder_id, reminder.calendar_id,
+        )
 
 
 async def _edit_event(chat_id: int, text: str, existing: CalendarEvent, settings: Settings, telegram: TelegramClient, calendar: CalendarClient, parser: GroqParser) -> None:
@@ -466,7 +521,7 @@ def _is_existing_reminder_request(text: str) -> bool:
 
 def _is_standalone_reminder_request(text: str) -> bool:
     lowered = text.strip().lower()
-    if lowered.startswith(("remind me to ", "remind me at ")):
+    if lowered.startswith(("remind me to ", "remind me at ", "remind me in ")):
         return True
 
     # A lead time links a reminder to an existing event (for example,
@@ -560,6 +615,56 @@ def _has_explicit_event_time(text: str) -> bool:
         or re.search(r"\b\d{1,2}\s*(?:am|pm)\b", lowered)
         or re.search(r"\b(?:at|from)\s+\d{1,2}\s+(?:to|until|till|-)\s+\d{1,2}\b", lowered)
     )
+
+
+def _event_parser_text(text: str) -> str:
+    """Remove routing controls and normalize all-day synonyms before LLM parsing."""
+    normalized = re.sub(r"^\s*add\s+anyway\b", "add", text, flags=re.IGNORECASE)
+    return re.sub(r"\bwhole[\s-]+day\b", "all day", normalized, flags=re.IGNORECASE)
+
+
+def _explicit_all_day_event(text: str, settings: Settings) -> ParsedEvent | None:
+    """Parse concise '<day> whole day with <title>' requests without the LLM."""
+    normalized = re.sub(r"^\s*add(?:\s+anyway)?\s+", "", text.strip(), flags=re.IGNORECASE)
+    match = re.match(
+        r"(?P<when>(?:on\s+)?(?:monday|tuesday|wednesday|thursday|friday|saturday|sunday|"
+        r"\d{1,2}(?:st|nd|rd|th)?\s+(?:jan(?:uary)?|feb(?:ruary)?|mar(?:ch)?|apr(?:il)?|may|"
+        r"jun(?:e)?|jul(?:y)?|aug(?:ust)?|sep(?:t(?:ember)?)?|oct(?:ober)?|nov(?:ember)?|dec(?:ember)?)(?:\s+\d{4})?))"
+        r"\s+(?:all|whole)[\s-]+day\s+(?:with|for)\s+(?P<title>.+?)\s*$",
+        normalized, flags=re.IGNORECASE,
+    )
+    if not match:
+        return None
+    when = re.sub(r"^on\s+", "", match.group("when"), flags=re.IGNORECASE).strip()
+    weekday = _upcoming_weekday_from_text(when, settings)
+    day = weekday or _calendar_date_from_text(when, settings)
+    if day is None:
+        return None
+    start = datetime.combine(day, datetime.min.time(), tzinfo=settings.timezone)
+    return ParsedEvent(
+        title=match.group("title").strip(), start=start, end=start + timedelta(days=1),
+        confidence="high", all_day=True,
+    )
+
+
+def _calendar_date_from_text(text: str, settings: Settings):
+    match = re.search(
+        r"\b(\d{1,2})(?:st|nd|rd|th)?\s+"
+        r"(jan(?:uary)?|feb(?:ruary)?|mar(?:ch)?|apr(?:il)?|may|jun(?:e)?|jul(?:y)?|"
+        r"aug(?:ust)?|sep(?:t(?:ember)?)?|oct(?:ober)?|nov(?:ember)?|dec(?:ember)?)"
+        r"(?:\s+(\d{4}))?\b",
+        text, flags=re.IGNORECASE,
+    )
+    if not match:
+        return None
+    year = int(match.group(3) or datetime.now(settings.timezone).year)
+    value = f"{match.group(1)} {match.group(2)} {year}"
+    for format_string in ("%d %B %Y", "%d %b %Y"):
+        try:
+            return datetime.strptime(value, format_string).date()
+        except ValueError:
+            continue
+    return None
 
 
 def _is_series_edit(text: str, event: CalendarEvent) -> bool:
@@ -803,6 +908,38 @@ def _reminders_from_text(text: str) -> list[ReminderSpec]:
     return reminders
 
 
+def _apply_standalone_clock_from_text(reminder, text: str, now: datetime) -> None:
+    """Keep dates inside reminder text from overriding an unqualified clock time."""
+    command = re.match(
+        r"^(?:(?:set|add)(?:\s+me)?\s+(?:a\s+)?reminder|remind\s+me)\b(?P<schedule>.*?)\bto\b",
+        text.strip(), flags=re.IGNORECASE,
+    )
+    if not command:
+        return
+    schedule = command.group("schedule")
+    clock = re.search(r"\b(?:at\s+)?(\d{1,2})(?:[:.](\d{2}))?\s*(am|pm)\b", schedule, flags=re.IGNORECASE)
+    if not clock or re.search(
+        r"\b(?:today|tonight|tomorrow|tmr|on|"
+        r"monday|tuesday|wednesday|thursday|friday|saturday|sunday|"
+        r"jan(?:uary)?|feb(?:ruary)?|mar(?:ch)?|apr(?:il)?|may|jun(?:e)?|"
+        r"jul(?:y)?|aug(?:ust)?|sep(?:t(?:ember)?)?|oct(?:ober)?|nov(?:ember)?|dec(?:ember)?)\b",
+        schedule, flags=re.IGNORECASE,
+    ):
+        return
+    hour = int(clock.group(1))
+    minute = int(clock.group(2) or 0)
+    if not 1 <= hour <= 12 or minute > 59:
+        return
+    if clock.group(3).lower() == "pm" and hour != 12:
+        hour += 12
+    elif clock.group(3).lower() == "am" and hour == 12:
+        hour = 0
+    due_at = now.replace(hour=hour, minute=minute, second=0, microsecond=0)
+    if due_at <= now:
+        due_at += timedelta(days=1)
+    reminder.due_at = due_at
+
+
 def _reminder_minutes_from_text(text: str) -> int | None:
     """Handle common reminder expressions even if the LLM omits the optional field."""
     lowered = text.lower()
@@ -836,7 +973,7 @@ def _apply_recurrence_from_text(event, text: str) -> None:
 
 def _apply_all_day_from_text(event, text: str, settings: Settings) -> None:
     """Convert explicit all-day wording to native date-only boundaries."""
-    if not re.search(r"\ball[\s-]?day\b", text, flags=re.IGNORECASE):
+    if not re.search(r"\b(?:all|whole)[\s-]?day\b", text, flags=re.IGNORECASE):
         return
     local_start = event.start.astimezone(settings.timezone)
     local_end = event.end.astimezone(settings.timezone)

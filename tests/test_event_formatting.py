@@ -1,7 +1,7 @@
-from datetime import datetime
+from datetime import datetime, timedelta
 from zoneinfo import ZoneInfo
 
-from app.main import LIST_WORDS, _apply_all_day_from_text, _apply_recurrence_from_text, _calendar_colour_emoji, _calendar_create_name, _calendar_delete_name, _chunk_section_message, _date_from_text, _format_calendar_list, _format_event_listing, _format_event_range, _format_reminder_listing, _format_update_confirmation, _has_explicit_event_time, _is_calendar_list_request, _is_explicit_add_request, _is_series_edit, _is_standalone_reminder_request, _reminder_message_from_text, _reminder_minutes_from_text, _reminders_from_text, _telegram_command, _unauthorised_message, _upcoming_weekday_from_text, _welcome_message
+from app.main import LIST_WORDS, _apply_all_day_from_text, _apply_recurrence_from_text, _apply_standalone_clock_from_text, _calendar_colour_emoji, _calendar_create_name, _calendar_delete_name, _chunk_section_message, _date_from_text, _event_parser_text, _explicit_all_day_event, _format_calendar_list, _format_event_listing, _format_event_range, _format_reminder_listing, _format_update_confirmation, _has_explicit_event_time, _is_calendar_list_request, _is_explicit_add_request, _is_series_edit, _is_standalone_reminder_request, _reminder_message_from_text, _reminder_minutes_from_text, _reminders_from_text, _telegram_command, _unauthorised_message, _upcoming_weekday_from_text, _welcome_message
 from app.models import ParsedEvent
 from app.models import CalendarEvent, CalendarInfo, ReminderSpec, ScheduledReminder
 
@@ -228,3 +228,58 @@ def test_telegram_slash_commands_support_bot_username_suffixes():
     assert _telegram_command("/calendars@SchedulingBot") == "calendars"
     assert _telegram_command("/NOW") == "now"
     assert _telegram_command("reminders") is None
+
+
+def test_unqualified_standalone_clock_ignores_date_inside_message():
+    now = datetime.fromisoformat("2026-08-26T09:28:00+08:00")
+    reminder = type("Reminder", (), {"due_at": datetime.fromisoformat("2026-09-07T23:55:00+08:00")})()
+
+    _apply_standalone_clock_from_text(
+        reminder,
+        "set a reminder at 11.55pm to book Bedok Stadium ActiveSG for 7 September",
+        now,
+    )
+
+    assert reminder.due_at == datetime.fromisoformat("2026-08-26T23:55:00+08:00")
+
+
+def test_explicit_standalone_schedule_date_is_preserved():
+    due_at = datetime.fromisoformat("2026-09-07T23:55:00+08:00")
+    reminder = type("Reminder", (), {"due_at": due_at})()
+
+    _apply_standalone_clock_from_text(
+        reminder,
+        "set a reminder at 11.55pm on 7 September to book the stadium",
+        datetime.fromisoformat("2026-08-26T09:28:00+08:00"),
+    )
+
+    assert reminder.due_at == due_at
+
+
+def test_whole_day_weekday_request_is_parsed_without_llm():
+    class Settings:
+        timezone = ZoneInfo("Asia/Singapore")
+
+    event = _explicit_all_day_event("add friday whole day with Ames", Settings())
+
+    assert event is not None
+    assert event.title == "Ames"
+    assert event.all_day is True
+    assert event.start.weekday() == 4
+    assert event.end - event.start == timedelta(days=1)
+
+
+def test_all_day_conflict_override_does_not_become_event_title():
+    class Settings:
+        timezone = ZoneInfo("Asia/Singapore")
+
+    event = _explicit_all_day_event("add anyway 28th August whole day with Ames", Settings())
+
+    assert event is not None
+    assert event.title == "Ames"
+    assert event.start.date().isoformat() == "2026-08-28"
+    assert _event_parser_text("add anyway meeting tomorrow") == "add meeting tomorrow"
+
+
+def test_relative_delay_before_reminder_message_is_standalone():
+    assert _is_standalone_reminder_request("remind me in an hour to call amelia")

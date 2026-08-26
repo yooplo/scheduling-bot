@@ -208,6 +208,22 @@ class CalendarClient:
         private.pop("telegram_reminder_sent", None)
         self._service.events().patch(calendarId=target_calendar_id, eventId=event.event_id, body={"extendedProperties": {"private": private}}).execute()
 
+    def remove_reminder(self, event_id: str, reminder_id: str, calendar_id: str | None = None) -> None:
+        target_calendar_id = calendar_id or self._calendar_id
+        item = self._service.events().get(calendarId=target_calendar_id, eventId=event_id).execute()
+        private = item.get("extendedProperties", {}).get("private", {})
+        reminders = [item for item in _reminders_from_properties(private) if item.reminder_id != reminder_id]
+        if reminders:
+            private["telegram_reminders"] = _serialize_reminders(reminders)
+        else:
+            private.pop("telegram_reminders", None)
+        private.pop("telegram_reminder_minutes", None)
+        private.pop("telegram_reminder_sent", None)
+        self._service.events().patch(
+            calendarId=target_calendar_id, eventId=event_id,
+            body={"extendedProperties": {"private": private}},
+        ).execute()
+
     def update_event(self, existing: CalendarEvent, event: ParsedEdit) -> CalendarEvent:
         body = {
             "summary": event.title,

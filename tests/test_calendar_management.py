@@ -4,7 +4,7 @@ from zoneinfo import ZoneInfo
 
 import pytest
 
-from app.main import handle_message, pending_calendar_deletions
+from app.main import handle_message, pending_calendar_deletions, recent_reminder_lists
 from app.models import CalendarInfo, ReminderSpec, ScheduledReminder
 
 
@@ -78,3 +78,37 @@ async def test_now_slash_command_uses_configured_timezone():
 
     assert telegram.messages[-1][1].startswith("🕒 ")
     assert "Asia/Singapore" in telegram.messages[-1][1]
+
+
+@pytest.mark.asyncio
+async def test_numbered_reminder_removal_uses_the_recent_reminder_list():
+    class Calendar:
+        def list_reminders(self, _days):
+            return []
+
+    class Cron:
+        def __init__(self):
+            self.deleted = []
+
+        async def list_reminders(self, _chat_id):
+            now = datetime.now(ZoneInfo("Asia/Singapore"))
+            return [
+                ScheduledReminder(event_id="cron:10", reminder=ReminderSpec(message="First"), due_at=now + timedelta(hours=1), standalone=True),
+                ScheduledReminder(event_id="cron:20", reminder=ReminderSpec(message="Second"), due_at=now + timedelta(hours=2), standalone=True),
+            ]
+
+        async def delete_reminder(self, job_id):
+            self.deleted.append(job_id)
+
+    chat_id = 246810
+    telegram = FakeTelegram()
+    cron = Cron()
+    settings = SimpleNamespace(timezone=ZoneInfo("Asia/Singapore"))
+    try:
+        await handle_message(chat_id, "reminders", settings, telegram, Calendar(), object(), cron)
+        await handle_message(chat_id, "remove 2", settings, telegram, Calendar(), object(), cron)
+
+        assert cron.deleted == [20]
+        assert telegram.messages[-1][1] == "🔕 Reminder removed: Second"
+    finally:
+        recent_reminder_lists.pop(chat_id, None)

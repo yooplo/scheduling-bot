@@ -206,3 +206,37 @@ def test_delivered_standalone_reminder_is_deleted_instead_of_marked_sent():
     client.mark_reminder_sent("reminder-event", "reminder-id", "reminder-calendar")
 
     assert calls["deleted"] == {"calendarId": "reminder-calendar", "eventId": "reminder-event"}
+
+
+def test_remove_reminder_preserves_other_reminders():
+    kept = ReminderSpec(reminder_id="keep", minutes_before=60)
+    removed = ReminderSpec(reminder_id="remove", minutes_before=15)
+    calls = {}
+
+    class Request:
+        def __init__(self, result=None):
+            self.result = result or {}
+
+        def execute(self):
+            return self.result
+
+    class Events:
+        def get(self, **kwargs):
+            return Request({"extendedProperties": {"private": {"telegram_reminders": _serialize_reminders([kept, removed])}}})
+
+        def patch(self, **kwargs):
+            calls.update(kwargs)
+            return Request()
+
+    class Service:
+        def events(self):
+            return Events()
+
+    client = CalendarClient.__new__(CalendarClient)
+    client._service = Service()
+    client._calendar_id = "primary"
+    client.remove_reminder("event", "remove", "calendar")
+
+    private = calls["body"]["extendedProperties"]["private"]
+    assert '"reminder_id":"keep"' in private["telegram_reminders"]
+    assert '"reminder_id":"remove"' not in private["telegram_reminders"]
