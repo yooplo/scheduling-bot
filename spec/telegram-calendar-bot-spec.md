@@ -2,9 +2,9 @@
 
 ## 1. Overview
 
-A private Telegram bot that lets one or two preconfigured users manage their own Google Calendar account by sending natural-language messages. It creates, lists, edits, and deletes events; handles weekly recurrence and multiple calendars; reports availability; and delivers independent or event-linked Telegram reminders.
+A private Telegram bot that lets one or two preconfigured users manage their own Google Calendar account using natural-language messages and slash commands. It creates, lists, edits, and deletes events and secondary calendars; handles weekly recurrence and multiple calendars; reports availability; and delivers independent or event-linked Telegram reminders.
 
-Groq converts free text into validated structured data. Google Calendar stores events and event-linked reminder metadata. Independent reminders are expiring jobs managed through the cron-job.org REST API, so they create no Calendar entry. The service runs as a FastAPI webhook application on Render.
+Deterministic routing handles commands, common reminder forms, calendar management, and concise all-day requests; Groq converts interpretation-heavy free text into validated structured data. Google Calendar stores events and event-linked reminder metadata. Independent reminders are expiring jobs managed through the cron-job.org REST API, so they create no Calendar entry. The service runs as a FastAPI webhook application on Render.
 
 ## 2. Goals / Non-Goals
 
@@ -14,6 +14,7 @@ Groq converts free text into validated structured data. Google Calendar stores e
 - Delete/cancel or edit events and reminders via free-text reference (fuzzy match against
   upcoming events)
 - Support independent reminders and reminders linked to existing events
+- Create owned secondary calendars and delete them only after confirmation
 - Isolate one or two fixed Telegram users, each with a separate Google authorization
 - Confirm every action back to the user in chat
 - Run reliably on a free-tier host with a webhook (no polling)
@@ -32,10 +33,10 @@ Groq converts free text into validated structured data. Google Calendar stores e
 | Bot transport | Telegram Bot API webhooks | Receive messages and send replies |
 | Web service | Python 3.12, FastAPI, Uvicorn | HTTPS webhook and scheduler endpoints |
 | Natural-language parsing | Groq API (`openai/gpt-oss-20b`) | Extract event, edit, delete, and reminder data |
-| Calendar | Google Calendar API v3, OAuth 2.0 | Multi-calendar event CRUD, calendar colours, reminder metadata, and availability data |
+| Calendar | Google Calendar API v3, OAuth 2.0 | Calendar and multi-calendar event CRUD, calendar colours, reminder metadata, and availability data |
 | Hosting | Render free web service | Public HTTPS runtime and GitHub deployment |
 | External scheduler | cron-job.org | Event-reminder polling, daily agenda delivery, and one-time independent reminder jobs |
-| Testing | pytest | Parser, Calendar conversion, and formatting tests |
+| Testing | pytest and pytest-asyncio | Parser, routing, dependency initialization, Calendar/cron clients, confirmation flows, and formatting tests |
 
 ### 3.2 Scheduled Notifications
 
@@ -47,11 +48,12 @@ Groq converts free text into validated structured data. Google Calendar stores e
 - **Deployment status:** the fixed event-reminder and daily-agenda jobs are configured and verified; successful scheduled calls return `204 No Content`. Dynamically created independent-reminder jobs must be verified after `CRON_JOB_API_KEY` and `SERVICE_BASE_URL` are configured in Render.
 ```
 Telegram (user) → Telegram webhook → Web app (FastAPI) → Router
-                                                              ├─ Add flow    → LLM (parse) → Google Calendar API (insert)
+                                                              ├─ Add flow    → deterministic/LLM parse → Google Calendar API (insert)
                                                               ├─ List flow   → Google Calendar API (list)
                                                               ├─ Delete flow → Google Calendar API (list) → LLM/fuzzy match → Google Calendar API (delete)
                                                               ├─ Edit flow   → Google Calendar API (list) → LLM (parse change) → Google Calendar API (patch)
-                                                              └─ Reminder    → LLM (parse/match) → private Calendar metadata
+                                                              ├─ Calendar    → deterministic command → Google Calendar API
+                                                              └─ Reminder    → deterministic/LLM parse → Calendar metadata or cron-job.org
                                                               ↓
                                                         Reply to Telegram
 
@@ -86,6 +88,8 @@ calendar-bot/
 │   ├── test_calendar_client.py
 │   ├── test_config.py
 │   ├── test_cron_client.py
+│   ├── test_dependencies.py
+│   ├── test_calendar_management.py
 │   └── test_event_formatting.py
 ├── requirements.txt
 ├── .env.example
@@ -100,7 +104,7 @@ calendar-bot/
 | Telegram Bot API | Receive/send messages | `TELEGRAM_BOT_TOKEN` |
 | Telegram webhook | Verify incoming requests are genuine | `TELEGRAM_WEBHOOK_SECRET` |
 | Groq API | Parse natural language into structured event data | `GROQ_API_KEY` |
-| Google Calendar API | Create/list/delete events | Shared `GOOGLE_CLIENT_ID`, `GOOGLE_CLIENT_SECRET`; per-user `GOOGLE_USER_1_REFRESH_TOKEN` and optional `GOOGLE_USER_2_REFRESH_TOKEN` |
+| Google Calendar API | Create/list/delete calendars and events | Shared `GOOGLE_CLIENT_ID`, `GOOGLE_CLIENT_SECRET`; per-user `GOOGLE_USER_1_REFRESH_TOKEN` and optional `GOOGLE_USER_2_REFRESH_TOKEN` |
 | cron-job.org | Invoke reminders and daily agenda; persist independent reminders | Callback bearer token `SCHEDULER_SECRET`; REST API key `CRON_JOB_API_KEY`; public `SERVICE_BASE_URL` |
 
 All secrets are stored as environment variables on the host. `.env.example`
@@ -108,7 +112,7 @@ documents every required variable with a placeholder value and a comment.
 
 ## 6. Data Contracts
 
-### 6.1 ParsedEvent (Groq → app)
+### 6.1 ParsedEvent (Groq or deterministic parser → app)
 
 Groq is prompted to return **only** this JSON shape, no prose:
 
@@ -130,7 +134,7 @@ Groq is prompted to return **only** this JSON shape, no prose:
 - `confidence: low` triggers a clarifying reply instead of creating the
   event outright (e.g. ambiguous date, missing time).
 - If `end` cannot be inferred, default to `start + 1 hour`.
-- Explicit `all day` wording sets `all_day: true`. Google Calendar writes use `start.date` and an exclusive `end.date`, never `dateTime` values such as 00:00–23:59.
+- Explicit `all day` or `whole day` wording sets `all_day: true`. Concise `<weekday/date> whole day with <title>` forms bypass Groq. Google Calendar writes use `start.date` and an exclusive `end.date`, never `dateTime` values such as 00:00–23:59.
 - Prompt must include the current datetime and the user's timezone so
   relative phrases ("tomorrow", "next Tuesday") resolve correctly.
 
@@ -171,13 +175,13 @@ plain text mode to avoid formatting bugs.
 
 ## 7. Command / Message Handling
 
-No slash commands required for v1 — every message is treated as natural
-language and routed by intent:
+Messages are routed deterministically where possible, with Groq used only when semantic extraction or matching is needed. Slash commands are optional aliases for common read-only actions:
 
 | User intent (examples) | Detected action |
 |---|---|
 | "dentist checkup tomorrow 2-3pm" | add |
 | "SPD offer email all day on 19 Aug" | add a native all-day event |
+| "add Friday whole day with Ames" | deterministically add a native all-day event titled `Ames` |
 | "cancel my dentist appointment" / "delete the 2pm meeting" | delete |
 | "move IPPT to 4pm" / "change dentist to Friday" | edit |
 | "reminders" / "show upcoming reminders" | list reminders |
@@ -187,7 +191,8 @@ language and routed by intent:
 | "disable reminder for IPPT" | remove reminder |
 | "remind me to pay the bill tomorrow at 9am" | independent Telegram reminder |
 | "set me a reminder tonight at 11.50pm to book the court" | independent Telegram reminder |
-| "set a reminder in 15minutes to shower" | independent Telegram reminder |
+| "set a reminder in 15 minutes to shower" | independent Telegram reminder |
+| "remind me in an hour to call Amelia" | independent Telegram reminder using relative-delay-first wording |
 | "remind me 15 minutes before Dental" | match Dental and attach an event reminder |
 | "what's on my calendar this week" / "list upcoming" | list |
 | "what are my plans on 19 Aug" | list events for that specific day |
@@ -199,19 +204,17 @@ language and routed by intent:
 | `/calendars` | list accessible calendars and colours |
 | `/now` | show the current date and time in `USER_TIMEZONE` |
 | Reply to a pending disambiguation (`2` or `second`) | resolve pending delete, edit, reminder attachment, or reminder removal |
+| After `reminders`, reply `remove 2` / `delete 2` / `cancel 2` | remove the numbered reminder, not an event |
+| "create calendar School" / "add School calender" | create a secondary calendar |
+| "delete calendar School" / "remove School calendar" | request confirmed calendar deletion |
 
-Intent detection can be a single Groq call that returns `action` as
-part of the JSON, or a lightweight keyword pre-check (e.g. "cancel",
-"delete", "remove" → delete; "what's on", "list", "show" → list;
-everything else → add) with Groq only used for add/delete/edit field
-extraction. **Recommendation: keyword pre-check for action routing,
-Groq only for field extraction** — cheaper and more predictable.
+The implemented router uses keyword/phrase checks and command parsers before invoking Groq. Groq is used for general event extraction, event matching, edits, and reminder interpretation; formatted replies are deterministic application templates rather than LLM-generated prose.
 
 ## 8. Core Flows
 
 ### 8.1 Add event
-1. Receive message → keyword check doesn't match delete/list → treat as add
-2. Call `parser.parse_event(message, now, timezone)`
+1. Receive message → deterministic intent checks do not match another flow → treat as add
+2. Normalize routing controls (`add anyway`) and all-day synonyms. Concise `<weekday/date> whole day with <title>` requests are parsed locally; otherwise call `parser.parse_event(message, now, timezone)`
 3. If `confidence: low` → reply asking for clarification, stop
 4. For explicit all-day wording, normalize to local-midnight date boundaries and set `all_day`; otherwise retain timed values
 5. Call `calendar_client.create_event(parsed_event)` using Google `date` fields for all-day events or `dateTime` fields for timed events
@@ -243,14 +246,15 @@ Groq only for field extraction** — cheaper and more predictable.
 
 ### 8.5 Reminders, recurring events, conflicts, and free time
 - An event can have multiple attached reminders, each with optional custom Telegram text. `another`, `also`, or `additional` appends instead of replacing the current reminder metadata.
-- Reminder intent is determined before generic event creation. A due time or delay (`tonight at 11.50pm`, `tomorrow at 9am`, `in 15minutes`) creates an independent reminder. A lead time before a referenced event (`15 minutes before Dental`) invokes event matching and attaches the reminder.
+- Reminder intent is determined before generic event creation. A due time or delay (`tonight at 11.50pm`, `tomorrow at 9am`, `in 15 minutes`, or `remind me in an hour to call Amelia`) creates an independent reminder. A lead time before a referenced event (`15 minutes before Dental`) invokes event matching and attaches the reminder.
 - An independent reminder is not linked to an existing event and never creates a Google Calendar entry. The bot creates an enabled cron-job.org job scheduled for the requested local minute with an expiry one day later. After creation it patches the secured callback body with the returned job ID. If that patch fails, creation is rolled back by deleting the incomplete job.
-- `reminders` and equivalent phrases list unsent reminders due in the next 30 days, combining both types chronologically. Output identifies `Independent reminder` or `Event reminder`; linked entries also show the event name and lead time.
-- Removing a standalone reminder deletes its cron-job.org job. Removing an event reminder clears its Telegram reminder metadata without deleting the event.
+- `reminders`, `/reminders`, and equivalent phrases combine unsent event-linked reminders from the next 30 days with active independent cron jobs, sorted chronologically. Output identifies `Independent reminder` or `Event reminder`; linked entries also show the event name and lead time. Long output is split below Telegram's message limit, and failure of one source does not suppress reminders retrieved from the other source.
+- The displayed reminder list is retained in memory for five minutes. `remove N`, `delete N`, or `cancel N` removes the selected reminder. Removing a standalone reminder deletes its cron-job.org job; removing an event-linked reminder removes only that reminder's metadata and preserves other reminders on the same event.
+- For an unqualified clock before the message delimiter—`at 11.55pm to book ... for 7 September`—the next occurrence of 11:55 PM is the due time and the later date remains message text. An explicit schedule date must occur before `to`, such as `at 11.55pm on 7 September to ...`.
 - The Calendar API's calendar list is used to show each accessible calendar's name and `backgroundColor` hex value. Users can create secondary calendars with either `create calendar School` or natural reversed wording such as `add School calendar` (including the common `calender` misspelling). Delete/remove supports both word orders and requires explicit confirmation within five minutes. The primary calendar and calendars the user does not own cannot be deleted. Lists, free-time checks, edits, deletes, and reminders span accessible calendars. A new event uses the default configured calendar unless its message explicitly names one; read-only calendars are never selected for insertion.
 - The scheduler checks reminder metadata every minute and sends the Telegram notification once.
 - Common weekly wording (`every Monday`) becomes a Google Calendar `RRULE:FREQ=WEEKLY;BYDAY=...` series. Recurring-series deletion removes the series master.
-- Before inserting an event, the app checks the next 30 days for overlap. The user must include `add anyway` to override a conflict warning.
+- Before inserting an event, the app checks the next 30 days for overlap. The user must include `add anyway` to override a conflict warning; those control words are removed before event-title parsing.
 - Free-time requests scan upcoming events and report one-hour-or-longer gaps from 12:00 AM through 11:59 PM.
 
 ## 9. Error Handling
@@ -266,6 +270,7 @@ Groq only for field extraction** — cheaper and more predictable.
 - All exceptions logged server-side with enough context to debug
   (message text, action detected, timestamp) — no need for a full
   logging stack, stdout logs on the host are sufficient for v1
+- Reminder listing isolates Google Calendar and cron-job.org failures, returns any partial results, and labels unavailable sources.
 
 ## 10. Timezone Handling
 
@@ -288,6 +293,7 @@ Groq only for field extraction** — cheaper and more predictable.
 - Google refresh token has calendar scope only
   (`https://www.googleapis.com/auth/calendar`), not broader Google
   account access
+- An External Google OAuth app left in Testing issues Calendar refresh tokens with a seven-day lifetime; the deployed app must use a valid production-status authorization or renew expired/revoked tokens.
 
 ## 12. Build Milestones
 
@@ -314,6 +320,7 @@ Groq only for field extraction** — cheaper and more predictable.
 - [x] Sending an edit phrase updates the correct event, with
       disambiguation when multiple events could match
 - [x] Recurring events, both reminder types, combined reminder listings, conflict warnings, named calendars, and free-time queries work as documented
+- [x] Slash commands, secondary-calendar creation/deletion, numbered reminder removal, and deterministic concise all-day parsing work as documented
 - [x] Bot rejects calendar access for Telegram users that are not configured
 - [x] Bot recovers gracefully (no crash, clear message) from a Google or
       Groq API failure
@@ -323,7 +330,8 @@ Groq only for field extraction** — cheaper and more predictable.
 
 ## 14. Current Operational Constraints
 
-- Upcoming event lists use a 7-day window; matching, conflicts, reminder management, and reminder listings use 30-day windows.
-- Pending numbered choices are held in memory for five minutes and are lost on a restart.
+- Upcoming event lists use a 7-day window; matching, conflicts, reminder management, and event-linked reminder listings use 30-day windows.
+- Pending event choices, calendar-deletion confirmations, and recently displayed reminder lists are held in memory for five minutes and are lost on a restart.
+- Google API requests use an independent authorized HTTP transport per request because the underlying `httplib2` transport is not thread-safe. Dependency initialization is published atomically so a failed OAuth/client initialization cannot leave partial global state.
 - Independent reminder persistence depends on the cron-job.org REST API and its account quotas (normally 100 API requests per day). Without both `CRON_JOB_API_KEY` and `SERVICE_BASE_URL`, independent reminder creation is disabled while calendar features remain available.
 - Delivery depends on cron-job.org reaching the sleeping Render service; the first request after idle may be delayed.

@@ -1,6 +1,6 @@
 # Telegram → Google Calendar bot
 
-A private, webhook-based FastAPI service that understands natural-language Telegram messages and manages Google Calendar events, Telegram reminders, recurring schedules, and availability. It supports one or two preconfigured Telegram users; each is isolated to their own Google account and calendars.
+A private, webhook-based FastAPI service that combines deterministic command routing with Groq-backed natural-language parsing to manage Google Calendar events, calendars, Telegram reminders, recurring schedules, and availability. It supports one or two preconfigured Telegram users; each is isolated to their own Google account and accessible calendars.
 
 Include a location naturally when creating an event, for example: `Dinner at La Pasta Saturday 7–9pm`. Locations are shown in upcoming lists when provided.
 
@@ -11,10 +11,10 @@ All requests use `USER_TIMEZONE` (normally `Asia/Singapore`).
 | Task | Example message |
 |---|---|
 | Add an event | `Dentist tomorrow 2–3pm` |
-| Add a native all-day event | `SPD offer email all day on 19 Aug` |
+| Add a native all-day event | `SPD offer email all day on 19 Aug` or `add Friday whole day with Ames` |
 | Add a location | `Dinner at La Pasta Saturday 7–9pm` |
 | Add custom or multiple event reminders | `Dentist tomorrow 2pm, remind me 1 hour before to bring ID and 15 minutes before` |
-| Add an independent reminder | `remind me to pay the bill tomorrow at 9am`, `set me a reminder tonight at 11.50pm to book the court`, or `set a reminder in 15minutes to shower` |
+| Add an independent reminder | `remind me to pay the bill tomorrow at 9am`, `remind me in an hour to call Amelia`, or `set a reminder in 15 minutes to shower` |
 | Add a recurring event | `Gym every Monday at 8pm` |
 | Start the bot | `/start` — receives a personalised welcome and examples |
 | List reminders | `/reminders` |
@@ -35,14 +35,14 @@ All requests use `USER_TIMEZONE` (normally `Asia/Singapore`).
 | Delete a recurring series | `remove the weekly Monday gym sessions` |
 | Set/change an event reminder | `set a reminder one day before IPPT`, `remind me 15 minutes before Dental`, or `change the reminder for supper to 8:50pm` |
 | Add another reminder | `add another reminder for IPPT 15 minutes before to leave now` |
-| Remove a reminder | `disable reminder for IPPT` |
+| Remove a reminder | `disable reminder for IPPT`, or list reminders and reply `remove 2` |
 | List all reminder types | `reminders` or `show me all upcoming reminders` (shows independent and event-linked reminders together) |
 
-The bot warns before creating an event that overlaps an upcoming event. To deliberately create it anyway, repeat the request with `add anyway`, for example `add anyway meeting tomorrow 2–3pm`.
+The bot warns before creating an event that overlaps an upcoming event. To deliberately create it anyway, repeat the request with `add anyway`, for example `add anyway meeting tomorrow 2–3pm`. The control words `add anyway` are removed before title parsing.
 
 Free-time results cover the full day, from 12:00 AM through 11:59 PM, and show slots of at least one hour. They include events from every calendar the user can view. New events go to the configured default calendar unless a writable named calendar is explicitly specified.
 
-Messages that explicitly say `all day` create native Google Calendar all-day events using date-only boundaries, rather than timed events from 12:00 AM to 11:59 PM. Multi-day all-day events use Google's exclusive end-date convention.
+Messages that explicitly say `all day` or `whole day` create native Google Calendar all-day events using date-only boundaries, rather than timed events from 12:00 AM to 11:59 PM. Concise forms such as `add Friday whole day with Ames` are parsed deterministically. Multi-day all-day events use Google's exclusive end-date convention.
 
 Calendar deletion requires confirmation within five minutes. The bot refuses to delete the primary Google Calendar or a shared calendar the user does not own.
 
@@ -59,10 +59,12 @@ Reminder wording determines whether a notification is independent or event-linke
 - A due time or delay creates an independent reminder: `tonight at 11.50pm`, `tomorrow at 9am`, or `in 15 minutes`.
 - A lead time before a named event links the reminder to that event: `15 minutes before Dental` or `one day before IPPT`.
 - `reminders` lists both types chronologically. Independent reminders are labelled `🔔 Independent reminder`; attached reminders are labelled `🔗 Event reminder` and show the calendar event.
+- The displayed reminder list remains selectable for five minutes. `remove 2`, `delete 2`, or `cancel 2` removes that reminder rather than a calendar event; removing one attached reminder preserves the others on the same event.
+- In `set a reminder at 11.55pm to book a court for 7 September`, the unqualified clock time controls delivery and `7 September` remains message text. Put an explicit date before `to`—for example `at 11.55pm on 7 September to ...`—to schedule delivery on that date.
 
 ## Current limitations
 
-- One or two preconfigured Telegram users and calendars only. Adding users or allowing account changes requires a database and web OAuth flow.
+- One or two preconfigured Telegram/Google accounts only. Each account can access and manage multiple calendars; adding users or changing linked accounts dynamically requires a database and web OAuth flow.
 - No voice-message transcription, attendee/invitation management, arbitrary user sign-up, or undo action.
 - Only common weekly recurrence wording is supported; arbitrary recurrence schedules are not exposed as a dedicated command flow.
 - Scheduler-based reminders and daily agenda require the cron-job.org setup below; confirm successful `204` job runs before relying on them.
@@ -80,7 +82,7 @@ Reminder wording determines whether a notification is independent or event-linke
    - `GROQ_MODEL` defaults to `openai/gpt-oss-20b`.
 
 3. **Google Calendar OAuth credentials**
-   - In [Google Cloud Console](https://console.cloud.google.com/), create a project, enable **Google Calendar API**, and configure the OAuth consent screen. For a personal app, add your Google account as a test user if the app is in Testing.
+   - In [Google Cloud Console](https://console.cloud.google.com/), create a project, enable **Google Calendar API**, and configure the OAuth consent screen. For a personal app, add your Google account as a test user while configuring it. An External app left in **Testing** receives Calendar refresh tokens that expire after seven days; move the consent screen to **In production** before relying on the deployed bot long-term.
    - Create an OAuth client: **APIs & Services → Credentials → Create credentials → OAuth client ID → Desktop app**. Download the JSON as `client_secret.json` in this project root. It is gitignored.
    - Create a virtual environment, install dependencies, and run the local authorization helper:
 
@@ -125,7 +127,7 @@ Before `git add`, run `git status` and make sure `.env` and `client_secret.json`
 
 1. Create an account at [Render](https://render.com/) and connect GitHub.
 2. Click **New → Blueprint**, select this repository, and approve `render.yaml`.
-3. Generate a webhook secret locally with `python -c "import secrets; print(secrets.token_urlsafe(32))"`. Enter it, along with the other values marked `sync: false`: `TELEGRAM_BOT_TOKEN`, `TELEGRAM_USER_1_ID`, `GOOGLE_USER_1_REFRESH_TOKEN`, `GROQ_API_KEY`, `GOOGLE_CLIENT_ID`, and `GOOGLE_CLIENT_SECRET`. For two people, also enter `TELEGRAM_USER_2_ID` and `GOOGLE_USER_2_REFRESH_TOKEN`. Keep the webhook secret available for the next step.
+3. Run `python -c "import secrets; print(secrets.token_urlsafe(32))"` twice to generate separate `TELEGRAM_WEBHOOK_SECRET` and `SCHEDULER_SECRET` values. Enter them along with the other required values marked `sync: false`: `TELEGRAM_BOT_TOKEN`, `TELEGRAM_USER_1_ID`, `GOOGLE_USER_1_REFRESH_TOKEN`, `GROQ_API_KEY`, `GOOGLE_CLIENT_ID`, and `GOOGLE_CLIENT_SECRET`. For two people, also enter `TELEGRAM_USER_2_ID` and `GOOGLE_USER_2_REFRESH_TOKEN`. Keep the webhook secret available for the next step; `CRON_JOB_API_KEY` and `SERVICE_BASE_URL` are configured when enabling independent reminders below.
 4. Deploy. Once healthy, copy its URL, for example `https://telegram-calendar-bot.onrender.com`.
 5. In Render, set `SERVICE_BASE_URL` to that origin without a trailing slash, then redeploy. Independent reminders also require `CRON_JOB_API_KEY`, configured in the scheduler section below.
 6. Register the webhook from PowerShell. Replace all placeholders; do not paste the command into a shell history if it contains your token:
@@ -155,9 +157,9 @@ In the cron-job.org Console, open **Settings → API keys**, generate an API key
 
 Add custom or multiple reminders in natural language, for example: `Dentist tomorrow at 2pm, remind me 1 hour before to bring ID and 15 minutes before`.
 For an existing event, say: `Set a reminder one day before IPPT` or `add another reminder for IPPT 15 minutes before to leave now`.
-For an independent reminder, say: `remind me to pay the bill tomorrow at 9am`, `set me a reminder tonight at 11.50pm to book the court`, or `set a reminder in 15minutes to shower`.
+For an independent reminder, say: `remind me to pay the bill tomorrow at 9am`, `remind me in an hour to call Amelia`, `set me a reminder tonight at 11.50pm to book the court`, or `set a reminder in 15 minutes to shower`.
 
-Independent reminders are not associated with an existing event and create no Google Calendar entry. Each is persisted as an expiring cron-job.org job, delivered through a secured callback, and deleted after delivery. Event-linked reminders remain in private metadata on their corresponding Calendar events. Both types appear together under `reminders`.
+Independent reminders are not associated with an existing event and create no Google Calendar entry. Each is persisted as an expiring cron-job.org job, delivered through a secured callback, and deleted after delivery. Event-linked reminders remain in private metadata on their corresponding Calendar events. Both types appear together under `reminders`; long lists are split across Telegram messages, and a temporary numbered list enables `remove N`.
 
 After upgrading from the previous calendar-backed implementation, existing pending records remain deliverable and are deleted as they fire. Once no legacy reminders remain, the old `Telegram Reminders` calendar can be deleted manually from Google Calendar.
 
