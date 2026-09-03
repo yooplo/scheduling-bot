@@ -100,6 +100,22 @@ async def webhook(request: Request, x_telegram_bot_api_secret_token: str | None 
     if not valid_webhook_secret(x_telegram_bot_api_secret_token, settings.telegram_webhook_secret):
         raise HTTPException(status_code=401, detail="Invalid webhook secret")
     update = await request.json()
+    callback = update.get("callback_query") or {}
+    if callback:
+        chat_id = callback.get("message", {}).get("chat", {}).get("id")
+        sender_id = callback.get("from", {}).get("id")
+        if chat_id != settings.telegram_group_id or sender_id not in calendars:
+            await telegram.answer_callback_query(callback.get("id", ""), "Not available here.")
+            return {"ok": True}
+        try:
+            await handle_schedule_callback(
+                chat_id, callback.get("id", ""), callback.get("data", ""),
+                settings, telegram, calendars,
+            )
+        except Exception:
+            logger.exception("Failed handling Telegram callback chat_id=%s", chat_id)
+            await telegram.send_message(chat_id, "Sorry, I couldn't complete that. Please try again.")
+        return {"ok": True}
     message = update.get("message") or {}
     chat = message.get("chat", {})
     chat_id = chat.get("id")
@@ -140,6 +156,13 @@ async def handle_group_schedule(
 ) -> None:
     """Serve full-detail, read-only schedules in the single allowed group."""
     lowered = text.lower()
+    if re.fullmatch(r"/schedule(?:@\w+)?", lowered.strip()):
+        buttons = [[{
+            "text": f"@{account.telegram_username or account.telegram_user_id}",
+            "callback_data": f"schedule:user:{account.telegram_user_id}",
+        }] for account in settings.calendar_accounts]
+        await telegram.send_message(chat_id, "Whose schedule?", {"inline_keyboard": buttons})
+        return
     if not any(word in lowered for word in LIST_WORDS):
         await telegram.send_message(chat_id, "Group access is read-only. Ask me to check a schedule.")
         return
@@ -171,6 +194,38 @@ async def handle_group_schedule(
         heading = f"@{target.telegram_username or target.telegram_user_id} — upcoming events"
     body = "\n\n".join(_format_event_listing(event, index=index) for index, event in enumerate(events, 1))
     await telegram.send_message(chat_id, f"{heading}:\n\n{body or 'No events.'}")
+
+
+async def handle_schedule_callback(
+    chat_id: int,
+    callback_id: str,
+    data: str,
+    settings: Settings,
+    telegram: TelegramClient,
+    calendars: dict[int, CalendarClient],
+) -> None:
+    await telegram.answer_callback_query(callback_id)
+    user_match = re.fullmatch(r"schedule:user:(\d+)", data)
+    if user_match:
+        target_id = int(user_match.group(1))
+        if target_id not in calendars:
+            return
+        buttons = [[
+            {"text": "Today", "callback_data": f"schedule:day:{target_id}:today"},
+            {"text": "Tomorrow", "callback_data": f"schedule:day:{target_id}:tomorrow"},
+            {"text": "Next 7 days", "callback_data": f"schedule:day:{target_id}:week"},
+        ]]
+        await telegram.send_message(chat_id, "Which day?", {"inline_keyboard": buttons})
+        return
+    day_match = re.fullmatch(r"schedule:day:(\d+):(today|tomorrow|week)", data)
+    if not day_match or int(day_match.group(1)) not in calendars:
+        return
+    target = settings.account_for(int(day_match.group(1)))
+    when = {"today": "today", "tomorrow": "tomorrow", "week": ""}[day_match.group(2)]
+    await handle_group_schedule(
+        chat_id, target.telegram_user_id, f"schedule @{target.telegram_username} {when}",
+        settings, telegram, calendars,
+    )
 
 
 @app.post("/scheduled/reminders")

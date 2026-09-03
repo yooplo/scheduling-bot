@@ -176,5 +176,6 @@ After setting `CRON_JOB_API_KEY` and `SERVICE_BASE_URL`, verify the dynamic flow
 - Messages from any Telegram user not configured as `TELEGRAM_USER_1_ID` or `TELEGRAM_USER_2_ID` receive an access-denied reply and no calendar operation is performed.
 - Private-chat operations use only the sender's paired Google account.
 - One allowlisted private group may expose either configured user's full event listing to the other; group operations are read-only and every other group is silently ignored.
+- In that group, `/schedule` opens inline buttons for choosing the user and date; typed forms such as `/schedule @username tomorrow` also work.
 - Each Google token uses only the Calendar scope.
 - Rotate any credential immediately if it is ever committed or pasted into a ticket/chat.
