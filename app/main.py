@@ -107,14 +107,19 @@ async def webhook(request: Request, x_telegram_bot_api_secret_token: str | None 
     first_name = (message.get("from", {}).get("first_name") or "").strip()
     text = (message.get("text") or "").strip()
     calendar = calendars.get(sender_id)
-    # Private chats prevent a permitted user from exposing their calendar to a
-    # group, and ensure each response stays with its paired Telegram account.
-    if not chat_id or chat.get("type") != "private" or not text:
+    if not chat_id or not text:
+        return {"ok": True}
+    if chat.get("type") in {"group", "supergroup"} and chat_id != settings.telegram_group_id:
         return {"ok": True}
     if calendar is None:
         await telegram.send_message(chat_id, _unauthorised_message())
         return {"ok": True}
     try:
+        if chat.get("type") in {"group", "supergroup"}:
+            await handle_group_schedule(chat_id, sender_id, text, settings, telegram, calendars)
+            return {"ok": True}
+        if chat.get("type") != "private":
+            return {"ok": True}
         if re.match(r"^/start(?:@\w+)?(?:\s|$)", text, flags=re.IGNORECASE):
             await telegram.send_message(chat_id, _welcome_message(first_name))
             return {"ok": True}
@@ -123,6 +128,49 @@ async def webhook(request: Request, x_telegram_bot_api_secret_token: str | None 
         logger.exception("Failed handling Telegram message chat_id=%s", chat_id)
         await telegram.send_message(chat_id, "Sorry, I couldn't complete that. Please try again.")
     return {"ok": True}
+
+
+async def handle_group_schedule(
+    chat_id: int,
+    sender_id: int,
+    text: str,
+    settings: Settings,
+    telegram: TelegramClient,
+    calendars: dict[int, CalendarClient],
+) -> None:
+    """Serve full-detail, read-only schedules in the single allowed group."""
+    lowered = text.lower()
+    if not any(word in lowered for word in LIST_WORDS):
+        await telegram.send_message(chat_id, "Group access is read-only. Ask me to check a schedule.")
+        return
+    mentioned = [
+        account for account in settings.calendar_accounts
+        if account.telegram_username and re.search(rf"(?<!\w)@{re.escape(account.telegram_username)}(?!\w)", lowered)
+    ]
+    if len(mentioned) > 1:
+        await telegram.send_message(chat_id, "Please check one person's schedule at a time.")
+        return
+    target = mentioned[0] if mentioned else settings.account_for(sender_id)
+    if target is None:
+        await telegram.send_message(chat_id, _unauthorised_message())
+        return
+
+    calendar = calendars[target.telegram_user_id]
+    explicit_day = _date_from_text(lowered, settings)
+    weekday = _upcoming_weekday_from_text(lowered, settings)
+    if "tomorrow" in lowered or "tmr" in lowered or explicit_day or weekday:
+        day = explicit_day or weekday or (datetime.now(settings.timezone).date() + timedelta(days=1))
+        events = await asyncio.to_thread(calendar.list_events_for_day, day)
+        heading = f"@{target.telegram_username or target.telegram_user_id} — {day:%A, %d %B}"
+    elif "today" in lowered:
+        day = datetime.now(settings.timezone).date()
+        events = await asyncio.to_thread(calendar.list_events_for_day, day)
+        heading = f"@{target.telegram_username or target.telegram_user_id} — {day:%A, %d %B}"
+    else:
+        events = await asyncio.to_thread(calendar.list_events, 7)
+        heading = f"@{target.telegram_username or target.telegram_user_id} — upcoming events"
+    body = "\n\n".join(_format_event_listing(event, index=index) for index, event in enumerate(events, 1))
+    await telegram.send_message(chat_id, f"{heading}:\n\n{body or 'No events.'}")
 
 
 @app.post("/scheduled/reminders")

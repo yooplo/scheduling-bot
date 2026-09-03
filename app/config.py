@@ -24,6 +24,7 @@ class CalendarAccount:
     telegram_user_id: int
     google_refresh_token: str
     google_calendar_id: str
+    telegram_username: str | None = None
 
 
 @dataclass(frozen=True)
@@ -40,6 +41,7 @@ class Settings:
     daily_agenda_hour: int
     cron_job_api_key: str | None
     service_base_url: str | None
+    telegram_group_id: int | None = None
 
     @property
     def timezone(self) -> ZoneInfo:
@@ -59,6 +61,7 @@ def _calendar_accounts() -> tuple[CalendarAccount, ...]:
         user_name = f"TELEGRAM_USER_{index}_ID"
         refresh_name = f"GOOGLE_USER_{index}_REFRESH_TOKEN"
         calendar_name = f"GOOGLE_USER_{index}_CALENDAR_ID"
+        username = os.getenv(f"TELEGRAM_USER_{index}_USERNAME", "").strip().lstrip("@").lower() or None
         user_id_value = os.getenv(user_name, "").strip()
         refresh_token = os.getenv(refresh_name, "").strip()
         if not user_id_value and not refresh_token:
@@ -69,7 +72,7 @@ def _calendar_accounts() -> tuple[CalendarAccount, ...]:
             user_id = int(user_id_value)
         except ValueError as exc:
             raise ConfigurationError(f"{user_name} must be numeric") from exc
-        accounts.append(CalendarAccount(user_id, refresh_token, os.getenv(calendar_name, "primary").strip() or "primary"))
+        accounts.append(CalendarAccount(user_id, refresh_token, os.getenv(calendar_name, "primary").strip() or "primary", username))
     # Preserve an existing single-user deployment until its environment values
     # are migrated to the numbered names.
     if not accounts:
@@ -94,6 +97,11 @@ def get_settings() -> Settings:
         raise ConfigurationError("DAILY_AGENDA_HOUR must be 0-23") from exc
     if not 0 <= daily_agenda_hour <= 23:
         raise ConfigurationError("DAILY_AGENDA_HOUR must be 0-23")
+    group_id_value = os.getenv("TELEGRAM_GROUP_ID", "").strip()
+    try:
+        group_id = int(group_id_value) if group_id_value else None
+    except ValueError as exc:
+        raise ConfigurationError("TELEGRAM_GROUP_ID must be numeric") from exc
     return Settings(
         telegram_bot_token=_required("TELEGRAM_BOT_TOKEN"),
         telegram_webhook_secret=_required("TELEGRAM_WEBHOOK_SECRET"),
@@ -107,4 +115,5 @@ def get_settings() -> Settings:
         daily_agenda_hour=daily_agenda_hour,
         cron_job_api_key=os.getenv("CRON_JOB_API_KEY", "").strip() or None,
         service_base_url=os.getenv("SERVICE_BASE_URL", "").strip().rstrip("/") or None,
+        telegram_group_id=group_id,
     )

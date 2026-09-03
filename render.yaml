@@ -18,6 +18,8 @@ services:
         sync: false
       - key: TELEGRAM_USER_1_ID
         sync: false
+      - key: TELEGRAM_USER_1_USERNAME
+        sync: false
       - key: GROQ_API_KEY
         sync: false
       - key: GROQ_MODEL
@@ -32,10 +34,14 @@ services:
         value: primary
       - key: TELEGRAM_USER_2_ID
         sync: false
+      - key: TELEGRAM_USER_2_USERNAME
+        sync: false
       - key: GOOGLE_USER_2_REFRESH_TOKEN
         sync: false
       - key: GOOGLE_USER_2_CALENDAR_ID
         value: primary
+      - key: TELEGRAM_GROUP_ID
+        sync: false
       - key: USER_TIMEZONE
         value: Asia/Singapore
       - key: SCHEDULER_SECRET

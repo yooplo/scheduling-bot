@@ -74,6 +74,7 @@ Reminder wording determines whether a notification is independent or event-linke
 1. **Telegram bot token and user IDs**
    - In Telegram, open [@BotFather](https://t.me/BotFather), run `/newbot`, and save its API token as `TELEGRAM_BOT_TOKEN`.
    - Each permitted person messages [@userinfobot](https://t.me/userinfobot) to obtain their numeric ID. Store the first person's ID as `TELEGRAM_USER_1_ID` and, if using a second person, the other as `TELEGRAM_USER_2_ID`.
+   - For shared schedule lookup, also set each person's username in `TELEGRAM_USER_n_USERNAME` (without `@`) and the private group or supergroup ID in `TELEGRAM_GROUP_ID`.
    - Generate `TELEGRAM_WEBHOOK_SECRET` locally with `python -c "import secrets; print(secrets.token_urlsafe(32))"`. Do not use the sample value from `.env.example`.
 
 2. **Groq key**
@@ -127,7 +128,7 @@ Before `git add`, run `git status` and make sure `.env` and `client_secret.json`
 
 1. Create an account at [Render](https://render.com/) and connect GitHub.
 2. Click **New → Blueprint**, select this repository, and approve `render.yaml`.
-3. Run `python -c "import secrets; print(secrets.token_urlsafe(32))"` twice to generate separate `TELEGRAM_WEBHOOK_SECRET` and `SCHEDULER_SECRET` values. Enter them along with the other required values marked `sync: false`: `TELEGRAM_BOT_TOKEN`, `TELEGRAM_USER_1_ID`, `GOOGLE_USER_1_REFRESH_TOKEN`, `GROQ_API_KEY`, `GOOGLE_CLIENT_ID`, and `GOOGLE_CLIENT_SECRET`. For two people, also enter `TELEGRAM_USER_2_ID` and `GOOGLE_USER_2_REFRESH_TOKEN`. Keep the webhook secret available for the next step; `CRON_JOB_API_KEY` and `SERVICE_BASE_URL` are configured when enabling independent reminders below.
+3. Run `python -c "import secrets; print(secrets.token_urlsafe(32))"` twice to generate separate `TELEGRAM_WEBHOOK_SECRET` and `SCHEDULER_SECRET` values. Enter them along with the other required values marked `sync: false`: `TELEGRAM_BOT_TOKEN`, `TELEGRAM_USER_1_ID`, `GOOGLE_USER_1_REFRESH_TOKEN`, `GROQ_API_KEY`, `GOOGLE_CLIENT_ID`, and `GOOGLE_CLIENT_SECRET`. For two people, also enter `TELEGRAM_USER_2_ID`, both `TELEGRAM_USER_n_USERNAME` values, `TELEGRAM_GROUP_ID`, and `GOOGLE_USER_2_REFRESH_TOKEN`. Keep the webhook secret available for the next step; `CRON_JOB_API_KEY` and `SERVICE_BASE_URL` are configured when enabling independent reminders below.
 4. Deploy. Once healthy, copy its URL, for example `https://telegram-calendar-bot.onrender.com`.
 5. In Render, set `SERVICE_BASE_URL` to that origin without a trailing slash, then redeploy. Independent reminders also require `CRON_JOB_API_KEY`, configured in the scheduler section below.
 6. Register the webhook from PowerShell. Replace all placeholders; do not paste the command into a shell history if it contains your token:
@@ -173,7 +174,7 @@ After setting `CRON_JOB_API_KEY` and `SERVICE_BASE_URL`, verify the dynamic flow
 
 - The webhook validates Telegram's secret header before processing anything.
 - Messages from any Telegram user not configured as `TELEGRAM_USER_1_ID` or `TELEGRAM_USER_2_ID` receive an access-denied reply and no calendar operation is performed.
-- Each configured user is routed only to their paired Google refresh token and calendar; the bot never exposes one user's events to the other.
-- The bot processes configured users only in private Telegram chats, never groups.
+- Private-chat operations use only the sender's paired Google account.
+- One allowlisted private group may expose either configured user's full event listing to the other; group operations are read-only and every other group is silently ignored.
 - Each Google token uses only the Calendar scope.
 - Rotate any credential immediately if it is ever committed or pasted into a ticket/chat.

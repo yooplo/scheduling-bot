@@ -16,6 +16,7 @@ Deterministic routing handles commands, common reminder forms, calendar manageme
 - Support independent reminders and reminders linked to existing events
 - Create owned secondary calendars and delete them only after confirmation
 - Isolate one or two fixed Telegram users, each with a separate Google authorization
+- Allow those users to read either user's full event details in one allowlisted private Telegram group
 - Confirm every action back to the user in chat
 - Run reliably on a free-tier host with a webhook (no polling)
 
@@ -287,8 +288,9 @@ The implemented router uses keyword/phrase checks and command parsers before inv
   an access-denied response
 - Every configured Telegram ID maps to exactly one Google refresh token and
   calendar. Requests, reminders, and agendas use only that user's calendar.
-- Webhook messages are processed only from private chats, preventing calendar
-  responses from being exposed to Telegram groups.
+- Private chats retain full calendar management. One configured private group or
+  supergroup may show full event listings, but only for the two configured users
+  and only for read-only schedule requests. All other groups are ignored.
 - No secrets committed to source control; `.env` gitignored
 - Google refresh token has calendar scope only
   (`https://www.googleapis.com/auth/calendar`), not broader Google
