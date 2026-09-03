@@ -291,7 +291,8 @@ The implemented router uses keyword/phrase checks and command parsers before inv
 - Private chats retain full calendar management. One configured private group or
   supergroup may show full event listings, but only for the two configured users
   and only for read-only schedule requests. `/schedule` opens user and date
-  selection buttons. All other groups are ignored.
+  selection buttons, with a five-minute forced-reply flow for specific dates.
+  All other groups are ignored.
 - No secrets committed to source control; `.env` gitignored
 - Google refresh token has calendar scope only
   (`https://www.googleapis.com/auth/calendar`), not broader Google

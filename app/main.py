@@ -53,6 +53,7 @@ class PendingReminderList:
 pending_actions: dict[int, PendingAction] = {}
 pending_calendar_deletions: dict[int, PendingCalendarDeletion] = {}
 recent_reminder_lists: dict[int, PendingReminderList] = {}
+pending_group_schedule_dates: dict[tuple[int, int], tuple[int, float]] = {}
 _settings: Settings | None = None
 _telegram: TelegramClient | None = None
 _calendars: dict[int, CalendarClient] | None = None
@@ -109,7 +110,7 @@ async def webhook(request: Request, x_telegram_bot_api_secret_token: str | None 
             return {"ok": True}
         try:
             await handle_schedule_callback(
-                chat_id, callback.get("id", ""), callback.get("data", ""),
+                chat_id, sender_id, callback.get("id", ""), callback.get("data", ""),
                 settings, telegram, calendars,
             )
         except Exception:
@@ -156,6 +157,26 @@ async def handle_group_schedule(
 ) -> None:
     """Serve full-detail, read-only schedules in the single allowed group."""
     lowered = text.lower()
+    pending_key = (chat_id, sender_id)
+    pending = pending_group_schedule_dates.get(pending_key)
+    if pending and pending[1] <= time.monotonic():
+        pending_group_schedule_dates.pop(pending_key, None)
+        pending = None
+    if pending:
+        day = (
+            datetime.now(settings.timezone).date() + timedelta(days=1)
+            if "tomorrow" in lowered or "tmr" in lowered
+            else datetime.now(settings.timezone).date() if "today" in lowered
+            else _calendar_date_from_text(lowered, settings) or _upcoming_weekday_from_text(lowered, settings)
+        )
+        if day is None:
+            await telegram.send_message(chat_id, "I couldn't read that date. Reply with something like 19 September.", {"force_reply": True, "selective": True})
+            return
+        pending_group_schedule_dates.pop(pending_key, None)
+        target = settings.account_for(pending[0])
+        if target:
+            await _send_group_schedule(chat_id, target, calendars[target.telegram_user_id], telegram, day)
+        return
     if re.fullmatch(r"/schedule(?:@\w+)?", lowered.strip()):
         buttons = [[{
             "text": f"@{account.telegram_username or account.telegram_user_id}",
@@ -179,14 +200,19 @@ async def handle_group_schedule(
         return
 
     calendar = calendars[target.telegram_user_id]
-    explicit_day = _date_from_text(lowered, settings)
+    explicit_day = _calendar_date_from_text(lowered, settings)
     weekday = _upcoming_weekday_from_text(lowered, settings)
     if "tomorrow" in lowered or "tmr" in lowered or explicit_day or weekday:
         day = explicit_day or weekday or (datetime.now(settings.timezone).date() + timedelta(days=1))
-        events = await asyncio.to_thread(calendar.list_events_for_day, day)
-        heading = f"@{target.telegram_username or target.telegram_user_id} — {day:%A, %d %B}"
     elif "today" in lowered:
         day = datetime.now(settings.timezone).date()
+    else:
+        day = None
+    await _send_group_schedule(chat_id, target, calendar, telegram, day)
+
+
+async def _send_group_schedule(chat_id, target, calendar, telegram, day=None) -> None:
+    if day:
         events = await asyncio.to_thread(calendar.list_events_for_day, day)
         heading = f"@{target.telegram_username or target.telegram_user_id} — {day:%A, %d %B}"
     else:
@@ -198,6 +224,7 @@ async def handle_group_schedule(
 
 async def handle_schedule_callback(
     chat_id: int,
+    sender_id: int,
     callback_id: str,
     data: str,
     settings: Settings,
@@ -213,19 +240,23 @@ async def handle_schedule_callback(
         buttons = [[
             {"text": "Today", "callback_data": f"schedule:day:{target_id}:today"},
             {"text": "Tomorrow", "callback_data": f"schedule:day:{target_id}:tomorrow"},
+        ], [
             {"text": "Next 7 days", "callback_data": f"schedule:day:{target_id}:week"},
+            {"text": "Specific date", "callback_data": f"schedule:day:{target_id}:specific"},
         ]]
         await telegram.send_message(chat_id, "Which day?", {"inline_keyboard": buttons})
         return
-    day_match = re.fullmatch(r"schedule:day:(\d+):(today|tomorrow|week)", data)
+    day_match = re.fullmatch(r"schedule:day:(\d+):(today|tomorrow|week|specific)", data)
     if not day_match or int(day_match.group(1)) not in calendars:
         return
     target = settings.account_for(int(day_match.group(1)))
-    when = {"today": "today", "tomorrow": "tomorrow", "week": ""}[day_match.group(2)]
-    await handle_group_schedule(
-        chat_id, target.telegram_user_id, f"schedule @{target.telegram_username} {when}",
-        settings, telegram, calendars,
-    )
+    choice = day_match.group(2)
+    if choice == "specific":
+        pending_group_schedule_dates[(chat_id, sender_id)] = (target.telegram_user_id, time.monotonic() + PENDING_TTL_SECONDS)
+        await telegram.send_message(chat_id, "Reply with a date, for example: 19 September", {"force_reply": True, "selective": True})
+        return
+    day = datetime.now(settings.timezone).date() + timedelta(days=1 if choice == "tomorrow" else 0) if choice != "week" else None
+    await _send_group_schedule(chat_id, target, calendars[target.telegram_user_id], telegram, day)
 
 
 @app.post("/scheduled/reminders")

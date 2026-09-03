@@ -5,7 +5,7 @@ from zoneinfo import ZoneInfo
 import pytest
 
 from app.config import CalendarAccount
-from app.main import handle_group_schedule, handle_schedule_callback
+from app.main import handle_group_schedule, handle_schedule_callback, pending_group_schedule_dates
 from app.models import CalendarEvent
 
 
@@ -81,7 +81,43 @@ async def test_bare_schedule_command_offers_user_then_day_buttons():
     assert telegram.messages[0][1] == "Whose schedule?"
     assert telegram.messages[0][2]["inline_keyboard"][1][0]["callback_data"] == "schedule:user:222"
 
-    await handle_schedule_callback(-100123, "callback-1", "schedule:user:222", settings, telegram, {222: object()})
+    await handle_schedule_callback(-100123, 111, "callback-1", "schedule:user:222", settings, telegram, {222: object()})
     assert telegram.callbacks == [("callback-1", None)]
     assert telegram.messages[1][1] == "Which day?"
     assert telegram.messages[1][2]["inline_keyboard"][0][1]["callback_data"] == "schedule:day:222:tomorrow"
+
+
+@pytest.mark.asyncio
+async def test_specific_date_button_prompts_for_and_reads_a_date():
+    class Telegram:
+        def __init__(self):
+            self.messages = []
+
+        async def send_message(self, chat_id, text, reply_markup=None):
+            self.messages.append((chat_id, text, reply_markup))
+
+        async def answer_callback_query(self, _callback_id, text=None):
+            pass
+
+    class Calendar:
+        requested_day = None
+
+        def list_events_for_day(self, day):
+            self.requested_day = day
+            return []
+
+    account = CalendarAccount(222, "token", "primary", "amemefoo")
+    settings = SimpleNamespace(
+        calendar_accounts=(account,), timezone=ZoneInfo("Asia/Singapore"),
+        account_for=lambda user_id: account if user_id == 222 else None,
+    )
+    telegram, calendar = Telegram(), Calendar()
+    try:
+        await handle_schedule_callback(-100123, 111, "callback-2", "schedule:day:222:specific", settings, telegram, {222: calendar})
+        assert telegram.messages[0][2] == {"force_reply": True, "selective": True}
+
+        await handle_group_schedule(-100123, 111, "19 September 2026", settings, telegram, {222: calendar})
+        assert calendar.requested_day.isoformat() == "2026-09-19"
+        assert "@amemefoo — Saturday, 19 September" in telegram.messages[1][1]
+    finally:
+        pending_group_schedule_dates.pop((-100123, 111), None)
