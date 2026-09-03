@@ -241,7 +241,6 @@ async def handle_schedule_callback(
             {"text": "Today", "callback_data": f"schedule:day:{target_id}:today"},
             {"text": "Tomorrow", "callback_data": f"schedule:day:{target_id}:tomorrow"},
         ], [
-            {"text": "Next 7 days", "callback_data": f"schedule:day:{target_id}:week"},
             {"text": "Specific date", "callback_data": f"schedule:day:{target_id}:specific"},
         ]]
         await telegram.send_message(chat_id, "Which day?", {"inline_keyboard": buttons})

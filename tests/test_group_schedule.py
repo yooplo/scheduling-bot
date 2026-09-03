@@ -85,6 +85,7 @@ async def test_bare_schedule_command_offers_user_then_day_buttons():
     assert telegram.callbacks == [("callback-1", None)]
     assert telegram.messages[1][1] == "Which day?"
     assert telegram.messages[1][2]["inline_keyboard"][0][1]["callback_data"] == "schedule:day:222:tomorrow"
+    assert all(button["text"] != "Next 7 days" for row in telegram.messages[1][2]["inline_keyboard"] for button in row)
 
 
 @pytest.mark.asyncio
