@@ -170,7 +170,7 @@ async def handle_group_schedule(
             else _calendar_date_from_text(lowered, settings) or _upcoming_weekday_from_text(lowered, settings)
         )
         if day is None:
-            await telegram.send_message(chat_id, "I couldn't read that date. Reply with something like 19 September.", {"force_reply": True, "selective": True})
+            await telegram.send_message(chat_id, "I couldn't read that date. Reply with something like 19 September.", {"force_reply": True})
             return
         pending_group_schedule_dates.pop(pending_key, None)
         target = settings.account_for(pending[0])
@@ -252,7 +252,7 @@ async def handle_schedule_callback(
     choice = day_match.group(2)
     if choice == "specific":
         pending_group_schedule_dates[(chat_id, sender_id)] = (target.telegram_user_id, time.monotonic() + PENDING_TTL_SECONDS)
-        await telegram.send_message(chat_id, "Reply with a date, for example: 19 September", {"force_reply": True, "selective": True})
+        await telegram.send_message(chat_id, "Reply with a date, for example: 19 September", {"force_reply": True})
         return
     day = datetime.now(settings.timezone).date() + timedelta(days=1 if choice == "tomorrow" else 0) if choice != "week" else None
     await _send_group_schedule(chat_id, target, calendars[target.telegram_user_id], telegram, day)

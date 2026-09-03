@@ -115,7 +115,7 @@ async def test_specific_date_button_prompts_for_and_reads_a_date():
     telegram, calendar = Telegram(), Calendar()
     try:
         await handle_schedule_callback(-100123, 111, "callback-2", "schedule:day:222:specific", settings, telegram, {222: calendar})
-        assert telegram.messages[0][2] == {"force_reply": True, "selective": True}
+        assert telegram.messages[0][2] == {"force_reply": True}
 
         await handle_group_schedule(-100123, 111, "19 September 2026", settings, telegram, {222: calendar})
         assert calendar.requested_day.isoformat() == "2026-09-19"
