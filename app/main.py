@@ -563,6 +563,7 @@ async def handle_message(chat_id: int, text: str, settings: Settings, telegram: 
         if event.start.tzinfo is None or event.end.tzinfo is None:
             await telegram.send_message(chat_id, "Please include a date and time with enough detail for me to schedule it.")
             return
+        _apply_weekday_from_text(event, text, now)
         conflicts = [existing for existing in await asyncio.to_thread(calendar.list_events, 30) if existing.start < event.end and (existing.end or existing.start) > event.start]
         if conflicts and "add anyway" not in lowered:
             details = "\n".join(f"• {existing.title} — {_format_event_range(existing)}" for existing in conflicts[:3])
@@ -846,6 +847,34 @@ def _date_from_text(text: str, settings: Settings):
         except ValueError:
             continue
     return None
+
+
+def _apply_weekday_from_text(event: ParsedEvent, text: str, now: datetime) -> None:
+    """Resolve a single relative weekday locally before checking conflicts."""
+    weekdays = ("monday", "tuesday", "wednesday", "thursday", "friday", "saturday", "sunday")
+    matches = list(re.finditer(
+        r"\b(?:(next|this|on|every)\s+)?(monday|tuesday|wednesday|thursday|friday|saturday|sunday)\b",
+        text, flags=re.IGNORECASE,
+    ))
+    # Leave date ranges and qualified calendar dates to the parser.
+    if len(matches) != 1 or re.search(
+        r"\b\d{1,4}[-/]\d{1,2}|\b\d{1,2}(?:st|nd|rd|th)\b|"
+        r"\b(?:jan(?:uary)?|feb(?:ruary)?|mar(?:ch)?|apr(?:il)?|may|jun(?:e)?|"
+        r"jul(?:y)?|aug(?:ust)?|sep(?:t(?:ember)?)?|oct(?:ober)?|nov(?:ember)?|dec(?:ember)?)\b|"
+        r"\b(?:last|following|after|before|weeks?|months?|today|tomorrow)\b",
+        text, flags=re.IGNORECASE,
+    ):
+        return
+    match = matches[0]
+    offset = (weekdays.index(match.group(2).lower()) - now.weekday()) % 7
+    if offset == 0 and (match.group(1) or "").lower() == "next":
+        offset = 7
+    target = now.date() + timedelta(days=offset)
+    local_start = event.start.astimezone(now.tzinfo)
+    local_end = event.end.astimezone(now.tzinfo)
+    shift = target - local_start.date()
+    event.start = local_start + shift
+    event.end = local_end + shift
 
 
 def _upcoming_weekday_from_text(text: str, settings: Settings):

@@ -218,8 +218,13 @@ The implemented router uses keyword/phrase checks and command parsers before inv
 2. Normalize routing controls (`add anyway`) and all-day synonyms. Concise `<weekday/date> whole day with <title>` requests are parsed locally; otherwise call `parser.parse_event(message, now, timezone)`
 3. If `confidence: low` → reply asking for clarification, stop
 4. For explicit all-day wording, normalize to local-midnight date boundaries and set `all_day`; otherwise retain timed values
-5. Call `calendar_client.create_event(parsed_event)` using Google `date` fields for all-day events or `dateTime` fields for timed events
-6. Reply with the created event range; native all-day events are labelled `All day`
+5. After validating timezone-aware start/end values, resolve a single unqualified weekday locally in the user's timezone before checking conflicts. Bare weekdays and `this`, `on`, or `every` use the next matching day, including today; `next` uses seven days later when today already matches. Shift both start and end by the same number of local calendar days, preserving clock times and overnight spans.
+6. Leave qualified dates and ranges to the parser: multiple weekday mentions, numeric dates, ordinal dates, month names, or qualifiers such as `last`, `following`, `after`, `before`, `week(s)`, `month(s)`, `today`, and `tomorrow` skip this correction.
+7. Check the corrected interval against upcoming events in the 30-day window. On overlap, warn and stop unless the request includes `add anyway`.
+8. Resolve the requested writable calendar and call `calendar_client.create_event(parsed_event)` using Google `date` fields for all-day events or `dateTime` fields for timed events
+9. Reply with the created event range; native all-day events are labelled `All day`
+
+Regression coverage in `tests/test_weekday_scheduling.py` verifies that a `next Monday` request on 9 September 2026 is corrected from an erroneous parser date of 12 September to 14 September before conflict checking and creation. It also covers `next Monday` requested on Monday, preservation of an overnight interval in the user's timezone, and leaving qualified dates and ranges unchanged.
 
 ### 8.2 List upcoming
 1. Detect "list" intent
