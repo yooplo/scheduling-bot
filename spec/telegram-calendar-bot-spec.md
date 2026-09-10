@@ -113,7 +113,7 @@ documents every required variable with a placeholder value and a comment.
 
 ## 6. Data Contracts
 
-### 6.1 ParsedEvent (Groq or deterministic parser → app)
+### 6.1 ParsedEventDraft / ParsedEvent (parser → app)
 
 Groq is prompted to return **only** this JSON shape, no prose:
 
@@ -121,8 +121,9 @@ Groq is prompted to return **only** this JSON shape, no prose:
 {
   "action": "add",
   "title": "string",
-  "start": "ISO 8601 datetime with timezone",
-  "end": "ISO 8601 datetime with timezone",
+  "start": "ISO 8601 datetime with timezone or null",
+  "end": "ISO 8601 datetime with timezone or null",
+  "missing_fields": ["date", "time", "duration"],
   "location": "string or null",
   "confidence": "high | low",
   "reminder_minutes": "integer or null",
@@ -134,7 +135,12 @@ Groq is prompted to return **only** this JSON shape, no prose:
 
 - `confidence: low` triggers a clarifying reply instead of creating the
   event outright (e.g. ambiguous date, missing time).
-- If `end` cannot be inferred, default to `start + 1 hour`.
+- `missing_fields` lists only missing or ambiguous scheduling details; a complete
+  request has an empty list. Groq returns a `ParsedEventDraft`, allowing null
+  start/end while details are missing. Only a complete draft is converted to
+  `ParsedEvent` for calendar operations.
+- Timed events require an end time or duration; the bot asks "How long?" instead
+  of assuming one hour. Reminder lead times do not count as event durations.
 - Explicit `all day` or `whole day` wording sets `all_day: true`. Concise `<weekday/date> whole day with <title>` forms bypass Groq. Google Calendar writes use `start.date` and an exclusive `end.date`, never `dateTime` values such as 00:00–23:59.
 - Prompt must include the current datetime and the user's timezone so
   relative phrases ("tomorrow", "next Tuesday") resolve correctly.
@@ -216,7 +222,10 @@ The implemented router uses keyword/phrase checks and command parsers before inv
 ### 8.1 Add event
 1. Receive message → deterministic intent checks do not match another flow → treat as add
 2. Normalize routing controls (`add anyway`) and all-day synonyms. Concise `<weekday/date> whole day with <title>` requests are parsed locally; otherwise call `parser.parse_event(message, now, timezone)`
-3. If `confidence: low` → reply asking for clarification, stop
+3. If scheduling details are missing, retain the request and ask one question:
+   "Which date?", "What time?", or "How long?", in that order. All-day events
+   require only a date. Other low-confidence results receive a clarification
+   prompt and retain the request as well. Do not create an incomplete event.
 4. For explicit all-day wording, normalize to local-midnight date boundaries and set `all_day`; otherwise retain timed values
 5. After validating timezone-aware start/end values, resolve a single unqualified weekday locally in the user's timezone before checking conflicts. Bare weekdays and `this`, `on`, or `every` use the next matching day, including today; `next` uses seven days later when today already matches. Shift both start and end by the same number of local calendar days, preserving clock times and overnight spans.
 6. Leave qualified dates and ranges to the parser: multiple weekday mentions, numeric dates, ordinal dates, month names, or qualifiers such as `last`, `following`, `after`, `before`, `week(s)`, `month(s)`, `today`, and `tomorrow` skip this correction.
@@ -225,6 +234,34 @@ The implemented router uses keyword/phrase checks and command parsers before inv
 9. Reply with the created event range; native all-day events are labelled `All day`
 
 Regression coverage in `tests/test_weekday_scheduling.py` verifies that a `next Monday` request on 9 September 2026 is corrected from an erroneous parser date of 12 September to 14 September before conflict checking and creation. It also covers `next Monday` requested on Monday, preservation of an overnight interval in the user's timezone, and leaving qualified dates and ranges unchanged.
+
+Private-chat event clarification retains the original request and successive
+answers for five minutes after each question. Replies bypass normal intent
+routing and return to event parsing, preserving the title, location, calendar,
+recurrence and reminders. One answer can supply several details. Relative dates
+use the original request's reference datetime throughout the conversation.
+`cancel` or `/cancel` cancels the draft; a new slash command or explicit
+`add`/`create`/`put` request discards it and follows normal handling. `/start`
+also clears it. An expired draft's next non-command reply asks the user to
+resend the event instead of treating the answer as a new event. Drafts are
+isolated by private chat and are lost on restart. Conflict handling and
+calendar permissions still apply once the event is complete. This flow covers
+event creation; edits and standalone reminders retain their existing behavior.
+
+Examples (each question also states the five-minute timeout and `/cancel`):
+
+- `Dentist tomorrow` → "What time?" → `2pm` → "How long?" → `1 hour`
+  → creates Dentist tomorrow, 2–3pm.
+- `Dentist at 2pm for 30 minutes` → "Which date?" → `13 September 2030`
+  → creates Dentist on that date, 2–2:30pm.
+- `add Holiday on 13 Sept 2030` → "What time?" → `all day`
+  → creates an all-day event without a duration question.
+- `Dentist` → "Which date?" → `tomorrow 2–3pm`
+  → creates the event without further questions.
+
+`tests/test_event_clarification.py` covers multi-step replies, multiple details
+in one reply, natural time answers, all-day completion, cancellation, expiry,
+chat isolation, replacement requests, retained context, and conflict checking.
 
 ### 8.2 List upcoming
 1. Detect "list" intent
@@ -357,7 +394,7 @@ are rejected by the parser. Regression coverage is in `tests/test_event_formatti
 ## 14. Current Operational Constraints
 
 - Upcoming event lists use a 7-day window; matching, conflicts, reminder management, and event-linked reminder listings use 30-day windows.
-- Pending event choices, calendar-deletion confirmations, and recently displayed reminder lists are held in memory for five minutes and are lost on a restart.
+- Pending event choices, event-creation drafts, calendar-deletion confirmations, and recently displayed reminder lists are held in memory for five minutes and are lost on a restart.
 - Google API requests use an independent authorized HTTP transport per request because the underlying `httplib2` transport is not thread-safe. Dependency initialization is published atomically so a failed OAuth/client initialization cannot leave partial global state.
 - Independent reminder persistence depends on the cron-job.org REST API and its account quotas (normally 100 API requests per day). Without both `CRON_JOB_API_KEY` and `SERVICE_BASE_URL`, independent reminder creation is disabled while calendar features remain available.
 - Delivery depends on cron-job.org reaching the sleeping Render service; the first request after idle may be delayed.

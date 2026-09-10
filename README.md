@@ -40,6 +40,8 @@ All requests use `USER_TIMEZONE` (normally `Asia/Singapore`).
 
 The bot warns before creating an event that overlaps an upcoming event. To deliberately create it anyway, repeat the request with `add anyway`, for example `add anyway meeting tomorrow 2–3pm`. The control words `add anyway` are removed before title parsing.
 
+When adding an event in private chat, the bot remembers incomplete requests and asks for the missing date, time, or duration. For example, `Dentist tomorrow` → `What time?` → `2pm` → `How long?` → `1 hour` creates a 2–3pm appointment. You can answer with several details at once or say `all day` to skip time and duration. Timed events no longer default to one hour. Reply within five minutes of each question; `cancel` or `/cancel` discards the draft. A new slash command or explicit `add`/`create`/`put` request starts fresh. Drafts are lost when the bot restarts.
+
 Free-time results cover the full day, from 12:00 AM through 11:59 PM, and show slots of at least one hour. They include events from every calendar the user can view. New events go to the configured default calendar unless a writable named calendar is explicitly specified.
 
 Messages that explicitly say `all day` or `whole day` create native Google Calendar all-day events using date-only boundaries, rather than timed events from 12:00 AM to 11:59 PM. Concise forms such as `add Friday whole day with Ames` are parsed deterministically. Multi-day all-day events use Google's exclusive end-date convention.

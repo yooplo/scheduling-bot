@@ -50,6 +50,14 @@ class PendingReminderList:
     expires_at: float
 
 
+@dataclass
+class PendingEventDraft:
+    request_text: str
+    now: datetime
+    expires_at: float
+
+
+pending_event_drafts: dict[int, PendingEventDraft] = {}
 pending_actions: dict[int, PendingAction] = {}
 pending_calendar_deletions: dict[int, PendingCalendarDeletion] = {}
 recent_reminder_lists: dict[int, PendingReminderList] = {}
@@ -138,6 +146,7 @@ async def webhook(request: Request, x_telegram_bot_api_secret_token: str | None 
         if chat.get("type") != "private":
             return {"ok": True}
         if re.match(r"^/start(?:@\w+)?(?:\s|$)", text, flags=re.IGNORECASE):
+            pending_event_drafts.pop(chat_id, None)
             await telegram.send_message(chat_id, _welcome_message(first_name))
             return {"ok": True}
         await handle_message(chat_id, text, settings, telegram, calendar, parser, cron)
@@ -310,6 +319,22 @@ async def scheduled_standalone_reminder(request: Request, authorization: str | N
 async def handle_message(chat_id: int, text: str, settings: Settings, telegram: TelegramClient, calendar: CalendarClient, parser: GroqParser, cron: CronJobClient | None = None) -> None:
     command = _telegram_command(text)
     lowered = command if command in {"reminders", "calendars", "now"} else text.lower().strip()
+    draft = pending_event_drafts.get(chat_id)
+    if draft:
+        if lowered == "cancel" or command == "cancel":
+            pending_event_drafts.pop(chat_id, None)
+            await telegram.send_message(chat_id, "Event creation cancelled.")
+            return
+        if text.lstrip().startswith("/") or _is_explicit_add_request(lowered):
+            pending_event_drafts.pop(chat_id, None)
+        elif draft.expires_at <= time.monotonic():
+            pending_event_drafts.pop(chat_id, None)
+            await telegram.send_message(chat_id, "That event draft has expired. Please send the event details again.")
+            return
+        else:
+            combined = f"{draft.request_text}\nUser follow-up: {text}"
+            await _add_event(chat_id, combined, settings, telegram, calendar, parser, draft.now)
+            return
     recent_reminders = recent_reminder_lists.get(chat_id)
     if recent_reminders and recent_reminders.expires_at <= time.monotonic():
         recent_reminder_lists.pop(chat_id, None)
@@ -537,52 +562,71 @@ async def handle_message(chat_id: int, text: str, settings: Settings, telegram: 
             lines = [_format_event_listing(event, index=index) for index, event in enumerate(events, 1)]
             await telegram.send_message(chat_id, heading + ":\n\n" + "\n\n".join(lines))
     else:
-        if (
-            _is_explicit_add_request(lowered)
-            and _date_from_text(lowered, settings)
-            and not _has_explicit_event_time(lowered)
-            and not re.search(r"\ball[\s-]?day\b", lowered)
-        ):
-            await telegram.send_message(
-                chat_id,
-                "What time should I schedule it? Include a time, for example 'at 7pm', or say 'all day'.",
-            )
-            return
-        now = datetime.now(settings.timezone)
-        event = _explicit_all_day_event(text, settings) or await asyncio.to_thread(
-            parser.parse_event, _event_parser_text(text), now, settings.user_timezone,
-        )
-        event.reminders = _reminders_from_text(text)
-        if not event.reminders and event.reminder_minutes:
-            event.reminders = [ReminderSpec(minutes_before=event.reminder_minutes, message=_reminder_message_from_text(text))]
-        _apply_recurrence_from_text(event, text)
-        _apply_all_day_from_text(event, text, settings)
-        if event.confidence == "low":
-            await telegram.send_message(chat_id, "I need a clearer date and time. For example: 'dentist tomorrow 2–3pm'.")
-            return
-        if event.start.tzinfo is None or event.end.tzinfo is None:
-            await telegram.send_message(chat_id, "Please include a date and time with enough detail for me to schedule it.")
-            return
-        _apply_weekday_from_text(event, text, now)
-        conflicts = [existing for existing in await asyncio.to_thread(calendar.list_events, 30) if existing.start < event.end and (existing.end or existing.start) > event.start]
-        if conflicts and "add anyway" not in lowered:
-            details = "\n".join(f"• {existing.title} — {_format_event_range(existing)}" for existing in conflicts[:3])
-            await telegram.send_message(chat_id, "⚠️ This overlaps with:\n" + details + "\n\nReply with 'add anyway' plus your event details to continue.")
-            return
-        target_calendar = await asyncio.to_thread(calendar.resolve_calendar, event.calendar_name)
-        if event.calendar_name and target_calendar is None:
-            await telegram.send_message(chat_id, f"I couldn't find a calendar named '{event.calendar_name}'. Send 'calendar types' to see your available calendars.")
-            return
-        if target_calendar and target_calendar.access_role not in {"owner", "writer"}:
-            await telegram.send_message(chat_id, f"I can see {target_calendar.name}, but you do not have permission to add events to it.")
-            return
-        created = await asyncio.to_thread(calendar.create_event, event, target_calendar.calendar_id if target_calendar else None)
-        reminder_confirmation = ""
-        if event.reminders:
-            reminder_confirmation = "\n⏰ " + _reminder_confirmation(event.reminders)
-        recurrence_confirmation = "\n🔁 Repeats weekly" if event.recurrence else ""
-        calendar_confirmation = f"\n🗓️ Calendar: {target_calendar.name}" if target_calendar else ""
-        await telegram.send_message(chat_id, f"✅ Added: {created.title} — {_format_event_range(created)}{calendar_confirmation}{recurrence_confirmation}{reminder_confirmation}")
+        await _add_event(chat_id, text, settings, telegram, calendar, parser)
+
+
+async def _add_event(chat_id, text, settings, telegram, calendar, parser, now=None):
+    lowered = text.lower()
+    now = now or datetime.now(settings.timezone)
+    if (
+        _is_explicit_add_request(lowered)
+        and "\nUser follow-up:" not in text
+        and _date_from_text(lowered, settings)
+        and not _has_explicit_event_time(lowered)
+        and not re.search(r"\b(?:all|whole)[\s-]+day\b", lowered)
+    ):
+        await _ask_event_detail(chat_id, text, "What time? You can also say 'all day'.", now, telegram)
+        return
+    event = _explicit_all_day_event(text, settings) or await asyncio.to_thread(
+        parser.parse_event, _event_parser_text(text), now, settings.user_timezone,
+    )
+    missing = getattr(event, "missing_fields", [])
+    question = next((prompt for field, prompt in (
+        ("date", "Which date?"),
+        ("time", "What time? You can also say 'all day'."),
+        ("duration", "How long? For example, '1 hour' or 'until 4pm'."),
+    ) if field in missing and (field == "date" or not event.all_day)), None)
+    if question or event.confidence == "low" or event.start is None or event.end is None:
+        await _ask_event_detail(chat_id, text, question or "What date and time should I use? Include an end time or duration, or say 'all day'.", now, telegram)
+        return
+    event = ParsedEvent.model_validate(event.model_dump())
+    event.reminders = _reminders_from_text(text)
+    if not event.reminders and event.reminder_minutes:
+        event.reminders = [ReminderSpec(minutes_before=event.reminder_minutes, message=_reminder_message_from_text(text))]
+    _apply_recurrence_from_text(event, text)
+    _apply_all_day_from_text(event, text, settings)
+    if event.start.tzinfo is None or event.end.tzinfo is None:
+        await telegram.send_message(chat_id, "Please include a date and time with enough detail for me to schedule it.")
+        return
+    if event.end <= event.start:
+        await _ask_event_detail(chat_id, text, "When should it end? Please give an end time after the start, or a positive duration.", now, telegram)
+        return
+    pending_event_drafts.pop(chat_id, None)
+    _apply_weekday_from_text(event, text, now)
+    conflicts = [existing for existing in await asyncio.to_thread(calendar.list_events, 30) if existing.start < event.end and (existing.end or existing.start) > event.start]
+    if conflicts and "add anyway" not in lowered:
+        details = "\n".join(f"• {existing.title} — {_format_event_range(existing)}" for existing in conflicts[:3])
+        await telegram.send_message(chat_id, "⚠️ This overlaps with:\n" + details + "\n\nReply with 'add anyway' plus your event details to continue.")
+        return
+    target_calendar = await asyncio.to_thread(calendar.resolve_calendar, event.calendar_name)
+    if event.calendar_name and target_calendar is None:
+        await telegram.send_message(chat_id, f"I couldn't find a calendar named '{event.calendar_name}'. Send 'calendar types' to see your available calendars.")
+        return
+    if target_calendar and target_calendar.access_role not in {"owner", "writer"}:
+        await telegram.send_message(chat_id, f"I can see {target_calendar.name}, but you do not have permission to add events to it.")
+        return
+    created = await asyncio.to_thread(calendar.create_event, event, target_calendar.calendar_id if target_calendar else None)
+    reminder_confirmation = ""
+    if event.reminders:
+        reminder_confirmation = "\n⏰ " + _reminder_confirmation(event.reminders)
+    recurrence_confirmation = "\n🔁 Repeats weekly" if event.recurrence else ""
+    calendar_confirmation = f"\n🗓️ Calendar: {target_calendar.name}" if target_calendar else ""
+    await telegram.send_message(chat_id, f"✅ Added: {created.title} — {_format_event_range(created)}{calendar_confirmation}{recurrence_confirmation}{reminder_confirmation}")
+
+
+async def _ask_event_detail(chat_id, text, question, now, telegram):
+    pending_event_drafts[chat_id] = PendingEventDraft(text, now, time.monotonic() + PENDING_TTL_SECONDS)
+    await telegram.send_message(chat_id, f"{question}\nReply within 5 minutes, or send /cancel.")
 
 
 async def _delete_event(chat_id: int, event: CalendarEvent, telegram: TelegramClient, calendar: CalendarClient) -> None:

@@ -21,6 +21,13 @@ class ParsedEvent(BaseModel):
     all_day: bool = False
 
 
+class ParsedEventDraft(ParsedEvent):
+    """An event request that may still need scheduling details."""
+    start: datetime | None = None
+    end: datetime | None = None
+    missing_fields: list[Literal["date", "time", "duration"]] = Field(default_factory=list)
+
+
 class ParsedEdit(BaseModel):
     """A complete replacement representation of an existing event or series."""
     action: Literal["edit"] = "edit"

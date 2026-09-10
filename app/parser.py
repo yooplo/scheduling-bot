@@ -6,7 +6,7 @@ from datetime import datetime
 from groq import Groq
 from pydantic import ValidationError
 
-from .models import CalendarEvent, DeleteMatch, ParsedEdit, ParsedEvent, ParsedReminder, ParsedStandaloneReminder
+from .models import CalendarEvent, DeleteMatch, ParsedEdit, ParsedEventDraft, ParsedReminder, ParsedStandaloneReminder
 
 
 class ParseError(RuntimeError):
@@ -18,14 +18,16 @@ class GroqParser:
         self._client = Groq(api_key=api_key)
         self._model = model
 
-    def parse_event(self, message: str, now: datetime, timezone_name: str) -> ParsedEvent:
+    def parse_event(self, message: str, now: datetime, timezone_name: str) -> ParsedEventDraft:
         prompt = f"""Extract one calendar event from the user's message. Return JSON only.
 Current datetime: {now.isoformat()}. User timezone: {timezone_name}.
 Resolve relative dates against that datetime. All datetime values must include an offset.
-If the user says "all day", set all_day true and use local midnight for start and the following local midnight for end. Otherwise set all_day false. If no end is given for a timed event, set it to one hour after start. Extract reminder_minutes if the user says "remind me X minutes/hours before"; otherwise use null. For recurring requests, return an RFC5545 RRULE such as `RRULE:FREQ=WEEKLY;BYDAY=MO`; otherwise null. Set calendar_name only if the user explicitly says to add the event in or under a named calendar; otherwise null. Use low confidence for an unclear date, or an unclear time unless the event is explicitly all-day.
-Schema: {{\"action\":\"add\",\"title\":string,\"start\":ISO8601,\"end\":ISO8601,\"location\":string|null,\"confidence\":\"high\"|\"low\",\"reminder_minutes\":integer|null,\"recurrence\":string|null,\"calendar_name\":string|null,\"all_day\":boolean}}
+If the user says "all day", set all_day true and use local midnight for start and the following local midnight for end. Otherwise set all_day false. Do not assume a date, time, or one-hour duration. Return missing_fields containing each missing or ambiguous scheduling detail: date, time, duration. For timed events, duration is supplied by an end time or a duration; reminder lead times are not event durations. For all-day events, never request time or duration. Use null for start/end when they cannot yet be resolved. Use low confidence whenever details are missing. If the request is otherwise unclear, also use low confidence.
+The message may contain answers labelled User follow-up. Combine them with the original request, preserve its title, location, calendar, recurrence and reminders, and let later answers correct earlier details. An answer may supply several missing details at once. Treat a bare duration answer such as '1 hour' as the event duration, not a reminder lead time.
+Extract reminder_minutes if the user says "remind me X minutes/hours before"; otherwise use null. For recurring requests, return an RFC5545 RRULE such as `RRULE:FREQ=WEEKLY;BYDAY=MO`; otherwise null. Set calendar_name only if the user explicitly says to add the event in or under a named calendar; otherwise null.
+Schema: {{\"action\":\"add\",\"title\":string,\"start\":ISO8601|null,\"end\":ISO8601|null,\"missing_fields\":[\"date\"|\"time\"|\"duration\"],\"location\":string|null,\"confidence\":\"high\"|\"low\",\"reminder_minutes\":integer|null,\"recurrence\":string|null,\"calendar_name\":string|null,\"all_day\":boolean}}
 User message: {message}"""
-        return self._request_model(prompt, ParsedEvent)
+        return self._request_model(prompt, ParsedEventDraft)
 
     def match_event(self, message: str, candidates: list[CalendarEvent]) -> DeleteMatch:
         options = [{"event_id": e.event_id, "title": e.title, "start": e.start.isoformat()} for e in candidates]
