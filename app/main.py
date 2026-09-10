@@ -159,7 +159,7 @@ async def handle_group_schedule(
     lowered = text.lower()
     pending_key = (chat_id, sender_id)
     pending = pending_group_schedule_dates.get(pending_key)
-    if pending and pending[1] <= time.monotonic():
+    if pending and (pending[1] <= time.monotonic() or lowered.startswith("/")):
         pending_group_schedule_dates.pop(pending_key, None)
         pending = None
     if pending:
@@ -792,7 +792,8 @@ def _calendar_date_from_text(text: str, settings: Settings):
     if not match:
         return None
     year = int(match.group(3) or datetime.now(settings.timezone).year)
-    value = f"{match.group(1)} {match.group(2)} {year}"
+    month = "Sep" if match.group(2).lower() == "sept" else match.group(2)
+    value = f"{match.group(1)} {month} {year}"
     for format_string in ("%d %B %Y", "%d %b %Y"):
         try:
             return datetime.strptime(value, format_string).date()
@@ -833,20 +834,7 @@ def _format_free_slots(events: list[CalendarEvent], settings: Settings, days: in
 
 
 def _date_from_text(text: str, settings: Settings):
-    match = re.search(
-        r"\b(\d{1,2})\s+(jan(?:uary)?|feb(?:ruary)?|mar(?:ch)?|apr(?:il)?|may|jun(?:e)?|jul(?:y)?|aug(?:ust)?|sep(?:t(?:ember)?)?|oct(?:ober)?|nov(?:ember)?|dec(?:ember)?)\b",
-        text,
-    )
-    if not match:
-        return None
-    year = datetime.now(settings.timezone).year
-    value = f"{match.group(1)} {match.group(2)} {year}"
-    for format_string in ("%d %B %Y", "%d %b %Y"):
-        try:
-            return datetime.strptime(value, format_string).date()
-        except ValueError:
-            continue
-    return None
+    return _calendar_date_from_text(text, settings)
 
 
 def _apply_weekday_from_text(event: ParsedEvent, text: str, now: datetime) -> None:

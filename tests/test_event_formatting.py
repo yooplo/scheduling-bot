@@ -97,6 +97,11 @@ def test_explicit_date_is_extracted_from_free_time_query():
     # A real Settings instance is unnecessary: the parser only needs its timezone name.
     assert _date_from_text("when am i free on 19 august", Settings()).day == 19
     assert _date_from_text("what are my plans on 19 aug", Settings()).day == 19
+    assert _date_from_text("when am i free on 13 Sept 2030", Settings()).isoformat() == "2030-09-13"
+    assert _date_from_text("what are my plans on 13th SEPT 2030", Settings()).isoformat() == "2030-09-13"
+    assert _date_from_text("plans on 29 February 2028", Settings()).isoformat() == "2028-02-29"
+    assert _date_from_text("plans on 29 February 2030", Settings()) is None
+    assert _date_from_text("plans on 31 Sept 2030", Settings()) is None
 
 
 def test_welcome_message_uses_telegram_first_name():

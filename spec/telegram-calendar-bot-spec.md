@@ -232,6 +232,12 @@ Regression coverage in `tests/test_weekday_scheduling.py` verifies that a `next 
    allow "this month" etc. to adjust window later)
 3. Reply with a formatted list, one line per event
 
+Private-chat schedule and free-time queries use the same calendar-date parser
+as group queries: `Sept`, `Sep`, and `September` are accepted case-insensitively,
+ordinal days are supported, and explicit four-digit years are honored. Without
+a year, the configured timezone's current year is used. Invalid calendar dates
+are rejected by the parser. Regression coverage is in `tests/test_event_formatting.py`.
+
 ### 8.3 Delete event
 1. Detect "delete" intent
 2. Call `calendar_client.list_events(days_ahead=30)`
@@ -297,6 +303,17 @@ Regression coverage in `tests/test_weekday_scheduling.py` verifies that a `next 
   supergroup may show full event listings, but only for the two configured users
   and only for read-only schedule requests. `/schedule` opens user and date
   selection buttons, with a five-minute forced-reply flow for specific dates.
+  Specific-date replies accept `13 Sept`, `13 Sep`, and `13 September`
+  case-insensitively, including ordinal days and an optional four-digit year
+  (for example, `13th Sept 2026`). An omitted year uses the current year in
+  the configured home timezone. Invalid dates such as `31 Sept` are rejected.
+  `tests/test_group_schedule.py` covers these September spellings, date
+  selection, and clearing the pending reply after a successful lookup.
+  A new slash command cancels only that sender's pending date reply in that
+  chat and follows normal group command handling. `/schedule` (including its
+  bot-addressed form) restarts user selection; `/schedule @username 13 Sept 2030`
+  directly reads the requested user's date. Unsupported commands retain the
+  read-only guidance. Other users' pending replies are unaffected.
   All other groups are ignored.
 - No secrets committed to source control; `.env` gitignored
 - Google refresh token has calendar scope only
