@@ -229,7 +229,7 @@ The implemented router uses keyword/phrase checks and command parsers before inv
 4. For explicit all-day wording, normalize to local-midnight date boundaries and set `all_day`; otherwise retain timed values
 5. After validating timezone-aware start/end values, resolve a single unqualified weekday locally in the user's timezone before checking conflicts. Bare weekdays and `this`, `on`, or `every` use the next matching day, including today; `next` uses seven days later when today already matches. Shift both start and end by the same number of local calendar days, preserving clock times and overnight spans.
 6. Leave qualified dates and ranges to the parser: multiple weekday mentions, numeric dates, ordinal dates, month names, or qualifiers such as `last`, `following`, `after`, `before`, `week(s)`, `month(s)`, `today`, and `tomorrow` skip this correction.
-7. Check the corrected interval against upcoming events in the 30-day window. On overlap, warn and stop unless the request includes `add anyway`.
+7. Check the corrected interval against upcoming events in the 30-day window. On overlap, retain the complete event and offer Add anyway, Change time, and Cancel buttons unless the request already includes `add anyway`.
 8. Resolve the requested writable calendar and call `calendar_client.create_event(parsed_event)` using Google `date` fields for all-day events or `dateTime` fields for timed events
 9. Reply with the created event range; native all-day events are labelled `All day`
 
@@ -262,6 +262,30 @@ Examples (each question also states the five-minute timeout and `/cancel`):
 `tests/test_event_clarification.py` covers multi-step replies, multiple details
 in one reply, natural time answers, all-day completion, cancellation, expiry,
 chat isolation, replacement requests, retained context, and conflict checking.
+
+Conflict choices in private chats retain the parsed event, original request,
+reference datetime, unique choice token and a five-minute expiry:
+
+- **Add anyway** creates the saved event directly without reparsing. Title,
+  times, location, calendar, recurrence and reminders are retained. Calendar
+  existence and write permissions are still checked.
+- **Change time** starts the existing clarification flow and asks for a new
+  date or time. The original request and resolved start/duration are retained;
+  later answers can change the date, time, duration or all-day status. The new
+  interval is checked for conflicts again and may produce a fresh warning.
+- **Cancel** discards the event without writing to Google Calendar.
+- Plain replies `add anyway`, `change time`, `cancel`, and `/cancel` perform
+  the same actions. Other messages discard the conflict choice and follow
+  normal routing. `/start` also clears it.
+- Callbacks are restricted to the configured user's own private chat. Tokens
+  are specific to one warning and consumed before awaiting external calls,
+  preventing repeated taps from submitting the same saved event twice.
+  Expired, replaced or already-used buttons display an expiry/used message;
+  an old token cannot act on a newer event. Saved conflicts are lost on restart.
+
+`tests/test_event_conflicts.py` covers saved-event creation, repeated and stale
+buttons, changed-time conflict checks, cancellation, expiry, new commands,
+calendar permissions, and webhook authorization.
 
 ### 8.2 List upcoming
 1. Detect "list" intent
@@ -303,7 +327,7 @@ are rejected by the parser. Regression coverage is in `tests/test_event_formatti
 - The Calendar API's calendar list is used to show each accessible calendar's name and `backgroundColor` hex value. Users can create secondary calendars with either `create calendar School` or natural reversed wording such as `add School calendar` (including the common `calender` misspelling). Delete/remove supports both word orders and requires explicit confirmation within five minutes. The primary calendar and calendars the user does not own cannot be deleted. Lists, free-time checks, edits, deletes, and reminders span accessible calendars. A new event uses the default configured calendar unless its message explicitly names one; read-only calendars are never selected for insertion.
 - The scheduler checks reminder metadata every minute and sends the Telegram notification once.
 - Common weekly wording (`every Monday`) becomes a Google Calendar `RRULE:FREQ=WEEKLY;BYDAY=...` series. Recurring-series deletion removes the series master.
-- Before inserting an event, the app checks the next 30 days for overlap. The user must include `add anyway` to override a conflict warning; those control words are removed before event-title parsing.
+- Before inserting an event, the app checks the next 30 days for overlap. A conflict warning retains the event and offers Add anyway, Change time, and Cancel for five minutes. The full textual `add anyway` request remains supported; those control words are removed before event-title parsing.
 - Free-time requests scan upcoming events and report one-hour-or-longer gaps from 12:00 AM through 11:59 PM.
 
 ## 9. Error Handling
@@ -394,7 +418,7 @@ are rejected by the parser. Regression coverage is in `tests/test_event_formatti
 ## 14. Current Operational Constraints
 
 - Upcoming event lists use a 7-day window; matching, conflicts, reminder management, and event-linked reminder listings use 30-day windows.
-- Pending event choices, event-creation drafts, calendar-deletion confirmations, and recently displayed reminder lists are held in memory for five minutes and are lost on a restart.
+- Pending event choices, event-creation drafts, conflict choices, calendar-deletion confirmations, and recently displayed reminder lists are held in memory for five minutes and are lost on a restart.
 - Google API requests use an independent authorized HTTP transport per request because the underlying `httplib2` transport is not thread-safe. Dependency initialization is published atomically so a failed OAuth/client initialization cannot leave partial global state.
 - Independent reminder persistence depends on the cron-job.org REST API and its account quotas (normally 100 API requests per day). Without both `CRON_JOB_API_KEY` and `SERVICE_BASE_URL`, independent reminder creation is disabled while calendar features remain available.
 - Delivery depends on cron-job.org reaching the sleeping Render service; the first request after idle may be delayed.

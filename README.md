@@ -38,7 +38,7 @@ All requests use `USER_TIMEZONE` (normally `Asia/Singapore`).
 | Remove a reminder | `disable reminder for IPPT`, or list reminders and reply `remove 2` |
 | List all reminder types | `reminders` or `show me all upcoming reminders` (shows independent and event-linked reminders together) |
 
-The bot warns before creating an event that overlaps an upcoming event. To deliberately create it anyway, repeat the request with `add anyway`, for example `add anyway meeting tomorrow 2–3pm`. The control words `add anyway` are removed before title parsing.
+The bot retains events that overlap an upcoming event and offers **Add anyway**, **Change time**, and **Cancel** buttons for five minutes. **Add anyway** creates the saved event without retyping; **Change time** asks for a new date/time, keeps the duration unless you change it, and checks conflicts again. You can also type `add anyway`, `change time`, or `cancel` while the warning is active. Other messages dismiss the warning and are handled normally. Old or already-used buttons cannot submit a newer draft. The full form `add anyway meeting tomorrow 2–3pm` still works; its control words are removed before title parsing.
 
 When adding an event in private chat, the bot remembers incomplete requests and asks for the missing date, time, or duration. For example, `Dentist tomorrow` → `What time?` → `2pm` → `How long?` → `1 hour` creates a 2–3pm appointment. You can answer with several details at once or say `all day` to skip time and duration. Timed events no longer default to one hour. Reply within five minutes of each question; `cancel` or `/cancel` discards the draft. A new slash command or explicit `add`/`create`/`put` request starts fresh. Drafts are lost when the bot restarts.
 

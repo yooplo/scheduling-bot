@@ -12,6 +12,7 @@ from app.models import CalendarEvent, CalendarInfo, ParsedEventDraft
 @pytest.fixture
 def flow():
     main.pending_event_drafts.clear()
+    main.pending_event_conflicts.clear()
     settings = SimpleNamespace(timezone=ZoneInfo("Asia/Singapore"), user_timezone="Asia/Singapore")
     telegram, calendar, parser = AsyncMock(), Mock(), Mock()
     calendar.list_events.return_value = []
@@ -24,6 +25,7 @@ def flow():
 
     yield send, telegram, calendar, parser
     main.pending_event_drafts.clear()
+    main.pending_event_conflicts.clear()
 
 
 def draft(**changes):

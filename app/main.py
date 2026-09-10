@@ -7,6 +7,7 @@ import re
 import time
 from dataclasses import dataclass
 from datetime import datetime, timedelta
+from uuid import uuid4
 
 from fastapi import FastAPI, Header, HTTPException, Request, Response
 
@@ -58,6 +59,18 @@ class PendingEventDraft:
 
 
 pending_event_drafts: dict[int, PendingEventDraft] = {}
+
+
+@dataclass
+class PendingEventConflict:
+    event: ParsedEvent
+    request_text: str
+    now: datetime
+    token: str
+    expires_at: float
+
+
+pending_event_conflicts: dict[int, PendingEventConflict] = {}
 pending_actions: dict[int, PendingAction] = {}
 pending_calendar_deletions: dict[int, PendingCalendarDeletion] = {}
 recent_reminder_lists: dict[int, PendingReminderList] = {}
@@ -113,6 +126,16 @@ async def webhook(request: Request, x_telegram_bot_api_secret_token: str | None 
     if callback:
         chat_id = callback.get("message", {}).get("chat", {}).get("id")
         sender_id = callback.get("from", {}).get("id")
+        if callback.get("data", "").startswith("conflict:"):
+            if callback.get("message", {}).get("chat", {}).get("type") != "private" or chat_id != sender_id or sender_id not in calendars:
+                await telegram.answer_callback_query(callback.get("id", ""), "Not available here.")
+                return {"ok": True}
+            try:
+                await handle_conflict_callback(chat_id, callback.get("id", ""), callback["data"], settings, telegram, calendars[sender_id])
+            except Exception:
+                logger.exception("Failed handling event conflict chat_id=%s", chat_id)
+                await telegram.send_message(chat_id, "Sorry, I couldn't complete that. Please check your calendar before trying again.")
+            return {"ok": True}
         if chat_id != settings.telegram_group_id or sender_id not in calendars:
             await telegram.answer_callback_query(callback.get("id", ""), "Not available here.")
             return {"ok": True}
@@ -147,6 +170,7 @@ async def webhook(request: Request, x_telegram_bot_api_secret_token: str | None 
             return {"ok": True}
         if re.match(r"^/start(?:@\w+)?(?:\s|$)", text, flags=re.IGNORECASE):
             pending_event_drafts.pop(chat_id, None)
+            pending_event_conflicts.pop(chat_id, None)
             await telegram.send_message(chat_id, _welcome_message(first_name))
             return {"ok": True}
         await handle_message(chat_id, text, settings, telegram, calendar, parser, cron)
@@ -319,6 +343,13 @@ async def scheduled_standalone_reminder(request: Request, authorization: str | N
 async def handle_message(chat_id: int, text: str, settings: Settings, telegram: TelegramClient, calendar: CalendarClient, parser: GroqParser, cron: CronJobClient | None = None) -> None:
     command = _telegram_command(text)
     lowered = command if command in {"reminders", "calendars", "now"} else text.lower().strip()
+    conflict = pending_event_conflicts.get(chat_id)
+    if conflict:
+        choice = {"add anyway": "add", "change time": "change", "cancel": "cancel", "/cancel": "cancel"}.get(lowered)
+        if choice:
+            await handle_conflict_callback(chat_id, "", f"conflict:{conflict.token}:{choice}", settings, telegram, calendar)
+            return
+        pending_event_conflicts.pop(chat_id, None)
     draft = pending_event_drafts.get(chat_id)
     if draft:
         if lowered == "cancel" or command == "cancel":
@@ -594,7 +625,8 @@ async def _add_event(chat_id, text, settings, telegram, calendar, parser, now=No
     if not event.reminders and event.reminder_minutes:
         event.reminders = [ReminderSpec(minutes_before=event.reminder_minutes, message=_reminder_message_from_text(text))]
     _apply_recurrence_from_text(event, text)
-    _apply_all_day_from_text(event, text, settings)
+    if "\nUser follow-up:" not in text:
+        _apply_all_day_from_text(event, text, settings)
     if event.start.tzinfo is None or event.end.tzinfo is None:
         await telegram.send_message(chat_id, "Please include a date and time with enough detail for me to schedule it.")
         return
@@ -606,8 +638,45 @@ async def _add_event(chat_id, text, settings, telegram, calendar, parser, now=No
     conflicts = [existing for existing in await asyncio.to_thread(calendar.list_events, 30) if existing.start < event.end and (existing.end or existing.start) > event.start]
     if conflicts and "add anyway" not in lowered:
         details = "\n".join(f"• {existing.title} — {_format_event_range(existing)}" for existing in conflicts[:3])
-        await telegram.send_message(chat_id, "⚠️ This overlaps with:\n" + details + "\n\nReply with 'add anyway' plus your event details to continue.")
+        token = uuid4().hex
+        pending_event_conflicts[chat_id] = PendingEventConflict(event, text, now, token, time.monotonic() + PENDING_TTL_SECONDS)
+        buttons = [[{"text": label, "callback_data": f"conflict:{token}:{action}"} for label, action in (
+            ("Add anyway", "add"), ("Change time", "change"), ("Cancel", "cancel"),
+        )]]
+        await telegram.send_message(chat_id, f"⚠️ This overlaps with:\n{details}\n\nPending: {event.title} — {_format_event_range(event)}\nChoose an option within 5 minutes.", {"inline_keyboard": buttons})
         return
+    await _create_event(chat_id, event, telegram, calendar)
+
+
+async def handle_conflict_callback(chat_id, callback_id, data, settings, telegram, calendar):
+    match = re.fullmatch(r"conflict:([a-f0-9]{32}):(add|change|cancel)", data)
+    pending = pending_event_conflicts.get(chat_id)
+    if not match or not pending or match.group(1) != pending.token or pending.expires_at <= time.monotonic():
+        if pending and pending.expires_at <= time.monotonic():
+            pending_event_conflicts.pop(chat_id, None)
+        message = "This choice has expired or was already used. Please send the event details again."
+        if callback_id:
+            await telegram.answer_callback_query(callback_id, message)
+        else:
+            await telegram.send_message(chat_id, message)
+        return
+    # Consume before awaiting so repeated taps cannot create the same draft twice.
+    pending_event_conflicts.pop(chat_id, None)
+    if callback_id:
+        await telegram.answer_callback_query(callback_id)
+    action = match.group(2)
+    if action == "cancel":
+        await telegram.send_message(chat_id, "Event creation cancelled.")
+    elif action == "change":
+        duration = (pending.event.end - pending.event.start).total_seconds() / 60
+        text = _event_parser_text(pending.request_text)
+        text += f"\nUser follow-up: Change the event's date/time using my next answer. Keep its duration of {duration:g} minutes unless I explicitly change it. Its current start is {pending.event.start.isoformat()}."
+        await _ask_event_detail(chat_id, text, "What date or time should I use instead? For example, 'tomorrow at 4pm'.", pending.now, telegram)
+    else:
+        await _create_event(chat_id, pending.event, telegram, calendar)
+
+
+async def _create_event(chat_id, event, telegram, calendar):
     target_calendar = await asyncio.to_thread(calendar.resolve_calendar, event.calendar_name)
     if event.calendar_name and target_calendar is None:
         await telegram.send_message(chat_id, f"I couldn't find a calendar named '{event.calendar_name}'. Send 'calendar types' to see your available calendars.")

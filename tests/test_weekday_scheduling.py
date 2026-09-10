@@ -21,7 +21,7 @@ async def test_monday_request_checks_monday_despite_wrong_parser_date(monkeypatc
     messages, created = [], []
 
     class Telegram:
-        async def send_message(self, chat_id, text):
+        async def send_message(self, chat_id, text, reply_markup=None):
             messages.append(text)
 
     class Parser:
