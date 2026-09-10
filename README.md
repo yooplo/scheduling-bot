@@ -143,6 +143,15 @@ Before `git add`, run `git status` and make sure `.env` and `client_secret.json`
 
 Render currently offers free Python web services, but they sleep after 15 minutes idle and can take about a minute to wake. Telegram retries failed webhook deliveries, so the bot should recover, but the first reply after idling can be delayed. Render free services also have ephemeral disks, which is why pending delete choices are intentionally short-lived in memory. See [Render's free-service limits](https://render.com/docs/free).
 
+## Event selection
+
+When an edit, deletion, or reminder request matches multiple events, tap the
+intended event's button, labelled with its title, date/time, and calendar.
+For example, `move Dentist to 4pm` may show two appointments; selecting one
+applies that change to it. Cancel dismisses the request. Choices expire after
+five minutes, and stale or repeated taps cannot execute the pending action.
+Plain numbers and ordinal replies such as `2` or `second` still work.
+
 ## Test
 
 ```powershell
@@ -179,5 +188,6 @@ After setting `CRON_JOB_API_KEY` and `SERVICE_BASE_URL`, verify the dynamic flow
 - Private-chat operations use only the sender's paired Google account.
 - One allowlisted private group may expose either configured user's full event listing to the other; group operations are read-only and every other group is silently ignored.
 - In that group, `/schedule` opens inline buttons for choosing the user and date, including a forced reply for a specific date; typed forms such as `/schedule @username tomorrow` also work.
+- Group schedule results include Yesterday and Tomorrow buttons to step from the displayed date, Pick date to enter another date, and Change person to view another user's schedule for the same date. Empty results also have these buttons. On upcoming-event lists, day navigation starts from the home timezone's current date when the result was sent; Change person keeps the upcoming view.
 - Each Google token uses only the Calendar scope.
 - Rotate any credential immediately if it is ever committed or pasted into a ticket/chat.

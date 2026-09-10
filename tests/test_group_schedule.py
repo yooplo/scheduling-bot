@@ -9,6 +9,105 @@ from app.main import _calendar_date_from_text, handle_group_schedule, handle_sch
 from app.models import CalendarEvent
 
 
+@pytest.fixture
+def navigation():
+    from unittest.mock import AsyncMock, Mock
+
+    accounts = (CalendarAccount(111, "token", "primary", "alice"), CalendarAccount(222, "token", "primary", "bob"))
+    settings = SimpleNamespace(
+        calendar_accounts=accounts, timezone=ZoneInfo("Asia/Singapore"),
+        account_for=lambda user_id: next((a for a in accounts if a.telegram_user_id == user_id), None),
+    )
+    telegram = AsyncMock()
+    calendars = {a.telegram_user_id: Mock() for a in accounts}
+    for calendar in calendars.values():
+        calendar.list_events_for_day.return_value = []
+        calendar.list_events.return_value = []
+
+    async def click(data):
+        await handle_schedule_callback(-100123, 111, "cb", data, settings, telegram, calendars)
+
+    def buttons():
+        return {b["text"]: b["callback_data"] for row in telegram.send_message.call_args.args[2]["inline_keyboard"] for b in row}
+
+    yield click, buttons, settings, telegram, calendars
+    pending_group_schedule_dates.pop((-100123, 111), None)
+    pending_group_schedule_dates.pop((-100123, 222), None)
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("shown,previous,following", [
+    ("2030-01-01", "2029-12-31", "2030-01-02"),
+    ("2028-03-01", "2028-02-29", "2028-03-02"),
+])
+async def test_navigation_steps_from_displayed_date(navigation, shown, previous, following):
+    click, buttons, _, telegram, calendars = navigation
+    await click(f"schedule:day:222:{shown}")
+    assert "No events." in telegram.send_message.call_args.args[1]
+    options = buttons()
+    assert set(options) == {"Yesterday", "Tomorrow", "Pick date", "Change person"}
+    assert all(len(value.encode()) <= 64 for value in options.values())
+    await click(options["Yesterday"])
+    calendars[222].list_events_for_day.assert_called_with(date.fromisoformat(previous))
+    await click(buttons()["Tomorrow"])
+    calendars[222].list_events_for_day.assert_called_with(date.fromisoformat(shown))
+    await click(buttons()["Tomorrow"])
+    calendars[222].list_events_for_day.assert_called_with(date.fromisoformat(following))
+    calendars[111].list_events_for_day.assert_not_called()
+
+
+@pytest.mark.asyncio
+async def test_change_person_preserves_date_and_clears_only_senders_prompt(navigation):
+    click, buttons, _, _, calendars = navigation
+    await click("schedule:day:222:2030-09-13")
+    change = buttons()["Change person"]
+    pending_group_schedule_dates[(-100123, 111)] = (222, float("inf"))
+    pending_group_schedule_dates[(-100123, 222)] = (222, float("inf"))
+    await click(change)
+    assert (-100123, 111) not in pending_group_schedule_dates
+    assert (-100123, 222) in pending_group_schedule_dates
+    await click(buttons()["@alice"])
+    calendars[111].list_events_for_day.assert_called_once_with(date(2030, 9, 13))
+    assert buttons()["Tomorrow"] == "schedule:day:111:2030-09-14"
+
+
+@pytest.mark.asyncio
+async def test_pick_date_reuses_prompt_and_returns_navigation(navigation):
+    click, buttons, settings, telegram, calendars = navigation
+    await click("schedule:day:222:2030-09-13")
+    await click(buttons()["Pick date"])
+    assert telegram.send_message.call_args.args[2] == {"force_reply": True}
+    await handle_group_schedule(-100123, 111, "19 Sept 2030", settings, telegram, calendars)
+    calendars[222].list_events_for_day.assert_called_with(date(2030, 9, 19))
+    assert buttons()["Tomorrow"] == "schedule:day:222:2030-09-20"
+
+
+@pytest.mark.asyncio
+async def test_upcoming_navigation_uses_home_date_and_preserves_week_when_switching(navigation):
+    from datetime import timedelta
+
+    click, buttons, settings, _, calendars = navigation
+    await click("schedule:day:222:week")
+    options = buttons()
+    today = datetime.now(settings.timezone).date()
+    assert options["Yesterday"] == f"schedule:day:222:{today - timedelta(days=1)}"
+    assert options["Tomorrow"] == f"schedule:day:222:{today + timedelta(days=1)}"
+    await click(options["Change person"])
+    await click(buttons()["@alice"])
+    calendars[111].list_events.assert_called_once_with(7)
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("data", ["schedule:day:222:2030-02-30", "schedule:user:222:2030-02-30", "schedule:people:2030-02-30", "schedule:day:999:2030-09-13"])
+async def test_invalid_navigation_does_not_query_calendar(navigation, data):
+    click, _, _, telegram, calendars = navigation
+    await click(data)
+    telegram.answer_callback_query.assert_awaited_once()
+    telegram.send_message.assert_not_awaited()
+    for calendar in calendars.values():
+        calendar.list_events_for_day.assert_not_called()
+
+
 @pytest.mark.asyncio
 async def test_group_schedule_reads_mentioned_users_calendar_with_details():
     class Telegram:

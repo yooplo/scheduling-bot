@@ -163,7 +163,7 @@ days) from Google Calendar, then asks Groq to pick the best match:
 ```
 
 - If `ambiguous: true` or no confident match, the bot replies with a
-  numbered list of candidates and waits for the user to pick one
+  candidate buttons and waits for the user to pick one (typed numbers remain supported)
   (simple in-memory pending-action state keyed by chat ID, with a
   short TTL).
 
@@ -300,11 +300,32 @@ a year, the configured timezone's current year is used. Invalid calendar dates
 are rejected by the parser. Regression coverage is in `tests/test_event_formatting.py`.
 
 ### 8.3 Delete event
+
+Ambiguous event selection uses one inline button per candidate, labelled with
+its number, title, date/time, and calendar when available. This applies to
+delete, edit, attaching reminders, and removing reminders. A Cancel button
+discards the pending action. Plain numbers and ordinal replies remain supported.
+Each prompt has a unique token and five-minute expiry, scoped to the user's
+private chat. Old, expired, or already-used buttons cannot execute an action or
+select from a newer prompt. Consume a valid selection before external calls to
+prevent repeated taps from executing the action twice. `/start` and new messages
+that are not selections discard the pending action. Callbacks require the
+configured user's own private chat. No extra confirmation is added to actions
+that previously executed after selecting an event.
+
+Example: `move Dentist to 4pm` with two matching appointments displays a
+button for each date. Tapping the intended appointment applies the original
+time change to that event. `cancel Dentist` similarly offers event buttons
+when the match is ambiguous; tapping Cancel discards the request. Regression
+coverage in `tests/test_event_selection.py` verifies action dispatch, retained
+edit/reminder requests, cancellation, expiry, stale/repeated taps, typed
+selection compatibility, and private-chat webhook authorization.
+
 1. Detect "delete" intent
 2. Call `calendar_client.list_events(days_ahead=30)`
 3. Call `parser.match_event(message, candidate_events)`
 4. If single confident match → delete immediately, confirm
-5. If ambiguous → reply with numbered candidates, store pending state
+5. If ambiguous → reply with candidate buttons, store pending state
    `{chat_id: [event_ids]}` with a 5-minute TTL
 6. On next message, if pending state exists and message looks like a
    selection (digit or ordinal), resolve and delete; otherwise clear
@@ -313,7 +334,7 @@ are rejected by the parser. Regression coverage is in `tests/test_event_formatti
 ### 8.4 Edit event
 1. Detect an edit keyword such as "change", "move", "reschedule", or "update"
 2. Fetch upcoming events for the next 30 days and match the referenced event
-3. If ambiguous, present numbered candidates and retain the original edit request for five minutes
+3. If ambiguous, present candidate buttons and retain the original edit request for five minutes
 4. Parse the requested change against the selected event, preserving fields the user did not change
 5. If confident, patch the Google Calendar event and confirm the updated time
 
@@ -364,6 +385,20 @@ are rejected by the parser. Regression coverage is in `tests/test_event_formatti
   supergroup may show full event listings, but only for the two configured users
   and only for read-only schedule requests. `/schedule` opens user and date
   selection buttons, with a five-minute forced-reply flow for specific dates.
+  Every group schedule result, including an empty result, has Yesterday,
+  Tomorrow, Pick date, and Change person buttons. Yesterday/Tomorrow step one
+  day backward/forward from the displayed date, including month/year boundaries;
+  their callbacks contain absolute dates so old results keep their context.
+  For an upcoming-events result, these buttons use the home timezone's date
+  at rendering time as their starting point. Pick date reuses the five-minute
+  forced-reply prompt for the displayed person. Change person opens the user
+  picker and then shows the selected person's schedule for the same date
+  (or preserves the upcoming-events view). Each lookup sends a new result
+  with fresh navigation buttons. Navigation clears only the tapping user's
+  pending date prompt in that group; other users' prompts are unaffected.
+  Invalid dates and unconfigured calendar targets are ignored. The existing
+  configured-group and authorized-user restrictions apply to all navigation.
+  Navigation regression coverage is in `tests/test_group_schedule.py`.
   Specific-date replies accept `13 Sept`, `13 Sep`, and `13 September`
   case-insensitively, including ordinal days and an optional four-digit year
   (for example, `13th Sept 2026`). An omitted year uses the current year in

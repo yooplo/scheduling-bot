@@ -6,7 +6,7 @@ import logging
 import re
 import time
 from dataclasses import dataclass
-from datetime import datetime, timedelta
+from datetime import date, datetime, timedelta
 from uuid import uuid4
 
 from fastapi import FastAPI, Header, HTTPException, Request, Response
@@ -37,6 +37,7 @@ class PendingAction:
     expires_at: float
     action: str
     request_text: str
+    token: str = ""
 
 
 @dataclass
@@ -126,14 +127,17 @@ async def webhook(request: Request, x_telegram_bot_api_secret_token: str | None 
     if callback:
         chat_id = callback.get("message", {}).get("chat", {}).get("id")
         sender_id = callback.get("from", {}).get("id")
-        if callback.get("data", "").startswith("conflict:"):
+        if callback.get("data", "").startswith(("conflict:", "select:")):
             if callback.get("message", {}).get("chat", {}).get("type") != "private" or chat_id != sender_id or sender_id not in calendars:
                 await telegram.answer_callback_query(callback.get("id", ""), "Not available here.")
                 return {"ok": True}
             try:
-                await handle_conflict_callback(chat_id, callback.get("id", ""), callback["data"], settings, telegram, calendars[sender_id])
+                if callback["data"].startswith("select:"):
+                    await handle_selection_callback(chat_id, callback.get("id", ""), callback["data"], settings, telegram, calendars[sender_id], parser, cron)
+                else:
+                    await handle_conflict_callback(chat_id, callback.get("id", ""), callback["data"], settings, telegram, calendars[sender_id])
             except Exception:
-                logger.exception("Failed handling event conflict chat_id=%s", chat_id)
+                logger.exception("Failed handling private callback chat_id=%s", chat_id)
                 await telegram.send_message(chat_id, "Sorry, I couldn't complete that. Please check your calendar before trying again.")
             return {"ok": True}
         if chat_id != settings.telegram_group_id or sender_id not in calendars:
@@ -171,6 +175,7 @@ async def webhook(request: Request, x_telegram_bot_api_secret_token: str | None 
         if re.match(r"^/start(?:@\w+)?(?:\s|$)", text, flags=re.IGNORECASE):
             pending_event_drafts.pop(chat_id, None)
             pending_event_conflicts.pop(chat_id, None)
+            pending_actions.pop(chat_id, None)
             await telegram.send_message(chat_id, _welcome_message(first_name))
             return {"ok": True}
         await handle_message(chat_id, text, settings, telegram, calendar, parser, cron)
@@ -208,7 +213,7 @@ async def handle_group_schedule(
         pending_group_schedule_dates.pop(pending_key, None)
         target = settings.account_for(pending[0])
         if target:
-            await _send_group_schedule(chat_id, target, calendars[target.telegram_user_id], telegram, day)
+            await _send_group_schedule(chat_id, target, calendars[target.telegram_user_id], telegram, settings, day)
         return
     if re.fullmatch(r"/schedule(?:@\w+)?", lowered.strip()):
         buttons = [[{
@@ -241,10 +246,10 @@ async def handle_group_schedule(
         day = datetime.now(settings.timezone).date()
     else:
         day = None
-    await _send_group_schedule(chat_id, target, calendar, telegram, day)
+    await _send_group_schedule(chat_id, target, calendar, telegram, settings, day)
 
 
-async def _send_group_schedule(chat_id, target, calendar, telegram, day=None) -> None:
+async def _send_group_schedule(chat_id, target, calendar, telegram, settings, day=None) -> None:
     if day:
         events = await asyncio.to_thread(calendar.list_events_for_day, day)
         heading = f"@{target.telegram_username or target.telegram_user_id} — {day:%A, %d %B}"
@@ -252,7 +257,17 @@ async def _send_group_schedule(chat_id, target, calendar, telegram, day=None) ->
         events = await asyncio.to_thread(calendar.list_events, 7)
         heading = f"@{target.telegram_username or target.telegram_user_id} — upcoming events"
     body = "\n\n".join(_format_event_listing(event, index=index) for index, event in enumerate(events, 1))
-    await telegram.send_message(chat_id, f"{heading}:\n\n{body or 'No events.'}")
+    anchor = day or datetime.now(settings.timezone).date()
+    target_id = target.telegram_user_id
+    buttons = [[
+        {"text": label, "callback_data": f"schedule:day:{target_id}:{date.fromordinal(anchor.toordinal() + offset).isoformat()}"}
+        for label, offset in (("Yesterday", -1), ("Tomorrow", 1))
+        if date.min.toordinal() <= anchor.toordinal() + offset <= date.max.toordinal()
+    ], [
+        {"text": "Pick date", "callback_data": f"schedule:day:{target_id}:specific"},
+        {"text": "Change person", "callback_data": f"schedule:people:{day.isoformat() if day else 'week'}"},
+    ]]
+    await telegram.send_message(chat_id, f"{heading}:\n\n{body or 'No events.'}", {"inline_keyboard": buttons})
 
 
 async def handle_schedule_callback(
@@ -265,11 +280,30 @@ async def handle_schedule_callback(
     calendars: dict[int, CalendarClient],
 ) -> None:
     await telegram.answer_callback_query(callback_id)
-    user_match = re.fullmatch(r"schedule:user:(\d+)", data)
+    people_match = re.fullmatch(r"schedule:people:(\d{4}-\d{2}-\d{2}|week)", data)
+    if people_match:
+        value = people_match.group(1)
+        if value != "week":
+            try:
+                date.fromisoformat(value)
+            except ValueError:
+                return
+        pending_group_schedule_dates.pop((chat_id, sender_id), None)
+        buttons = [[{
+            "text": f"@{account.telegram_username or account.telegram_user_id}",
+            "callback_data": f"schedule:user:{account.telegram_user_id}:{value}",
+        }] for account in settings.calendar_accounts if account.telegram_user_id in calendars]
+        await telegram.send_message(chat_id, "Whose schedule?", {"inline_keyboard": buttons})
+        return
+    user_match = re.fullmatch(r"schedule:user:(\d+)(?::(\d{4}-\d{2}-\d{2}|week))?", data)
     if user_match:
         target_id = int(user_match.group(1))
         if target_id not in calendars:
             return
+        if user_match.group(2):
+            await _show_selected_schedule(chat_id, sender_id, target_id, user_match.group(2), settings, telegram, calendars)
+            return
+        pending_group_schedule_dates.pop((chat_id, sender_id), None)
         buttons = [[
             {"text": "Today", "callback_data": f"schedule:day:{target_id}:today"},
             {"text": "Tomorrow", "callback_data": f"schedule:day:{target_id}:tomorrow"},
@@ -278,17 +312,35 @@ async def handle_schedule_callback(
         ]]
         await telegram.send_message(chat_id, "Which day?", {"inline_keyboard": buttons})
         return
-    day_match = re.fullmatch(r"schedule:day:(\d+):(today|tomorrow|week|specific)", data)
+    day_match = re.fullmatch(r"schedule:day:(\d+):(today|tomorrow|week|specific|\d{4}-\d{2}-\d{2})", data)
     if not day_match or int(day_match.group(1)) not in calendars:
         return
     target = settings.account_for(int(day_match.group(1)))
     choice = day_match.group(2)
+    if target is None:
+        return
     if choice == "specific":
         pending_group_schedule_dates[(chat_id, sender_id)] = (target.telegram_user_id, time.monotonic() + PENDING_TTL_SECONDS)
         await telegram.send_message(chat_id, "Reply with a date, for example: 19 September", {"force_reply": True})
         return
-    day = datetime.now(settings.timezone).date() + timedelta(days=1 if choice == "tomorrow" else 0) if choice != "week" else None
-    await _send_group_schedule(chat_id, target, calendars[target.telegram_user_id], telegram, day)
+    if choice not in {"today", "tomorrow"}:
+        await _show_selected_schedule(chat_id, sender_id, target.telegram_user_id, choice, settings, telegram, calendars)
+        return
+    pending_group_schedule_dates.pop((chat_id, sender_id), None)
+    day = datetime.now(settings.timezone).date() + timedelta(days=1 if choice == "tomorrow" else 0)
+    await _send_group_schedule(chat_id, target, calendars[target.telegram_user_id], telegram, settings, day)
+
+
+async def _show_selected_schedule(chat_id, sender_id, target_id, value, settings, telegram, calendars):
+    try:
+        day = None if value == "week" else date.fromisoformat(value)
+    except ValueError:
+        return
+    target = settings.account_for(target_id)
+    if target is None:
+        return
+    pending_group_schedule_dates.pop((chat_id, sender_id), None)
+    await _send_group_schedule(chat_id, target, calendars[target_id], telegram, settings, day)
 
 
 @app.post("/scheduled/reminders")
@@ -401,23 +453,14 @@ async def handle_message(chat_id: int, text: str, settings: Settings, telegram: 
 
     pending = pending_actions.get(chat_id)
     if pending and pending.expires_at > time.monotonic():
+        if lowered == "cancel" or command == "cancel":
+            pending_actions.pop(chat_id, None)
+            await telegram.send_message(chat_id, "Selection cancelled.")
+            return
         selected = _selection(text, pending.events)
         if selected:
             pending_actions.pop(chat_id, None)
-            if pending.action == "delete":
-                await _delete_event(chat_id, selected, telegram, calendar)
-            elif pending.action == "edit":
-                await _edit_event(chat_id, pending.request_text, selected, settings, telegram, calendar, parser)
-            elif pending.action == "clear_reminder":
-                if selected.event_id.startswith("cron:") and cron:
-                    await cron.delete_reminder(int(selected.event_id.removeprefix("cron:")))
-                elif selected.is_standalone_reminder:
-                    await asyncio.to_thread(calendar.delete_event, selected)
-                else:
-                    await asyncio.to_thread(calendar.clear_reminder, selected)
-                await telegram.send_message(chat_id, f"🔕 Reminder removed: {selected.title}")
-            else:
-                await _set_reminder(chat_id, pending.request_text, selected, settings, telegram, calendar, parser)
+            await _execute_selection(chat_id, pending, selected, settings, telegram, calendar, parser, cron)
             return
         pending_actions.pop(chat_id, None)
     if command == "now":
@@ -988,16 +1031,59 @@ def _upcoming_weekday_from_text(text: str, settings: Settings):
     return today + timedelta(days=offset)
 
 
+async def _execute_selection(chat_id, pending, selected, settings, telegram, calendar, parser, cron):
+    if pending.action == "delete":
+        await _delete_event(chat_id, selected, telegram, calendar)
+    elif pending.action == "edit":
+        await _edit_event(chat_id, pending.request_text, selected, settings, telegram, calendar, parser)
+    elif pending.action == "clear_reminder":
+        if selected.event_id.startswith("cron:") and cron:
+            await cron.delete_reminder(int(selected.event_id.removeprefix("cron:")))
+        elif selected.is_standalone_reminder:
+            await asyncio.to_thread(calendar.delete_event, selected)
+        else:
+            await asyncio.to_thread(calendar.clear_reminder, selected)
+        await telegram.send_message(chat_id, f"🔕 Reminder removed: {selected.title}")
+    else:
+        await _set_reminder(chat_id, pending.request_text, selected, settings, telegram, calendar, parser)
+
+
 async def _ask_to_select(chat_id: int, action: str, request_text: str, events: list[CalendarEvent], match, telegram: TelegramClient) -> None:
     choices = [event for event in events if event.event_id in {candidate.event_id for candidate in match.candidates}] or events[:5]
-    pending_actions[chat_id] = PendingAction(choices, time.monotonic() + PENDING_TTL_SECONDS, action, request_text)
+    token = uuid4().hex
+    pending_actions[chat_id] = PendingAction(choices, time.monotonic() + PENDING_TTL_SECONDS, action, request_text, token)
     lines = [f"{i}. {event.title} — {_format_time(event.start)}" for i, event in enumerate(choices, 1)]
     verb = {"edit": "edit", "delete": "delete", "remind": "set a reminder for", "clear_reminder": "remove the reminder for"}[action]
-    await telegram.send_message(chat_id, f"Which event should I {verb}? Reply with a number:\n" + "\n".join(lines))
+    buttons = [[{
+        "text": f"{i}. {event.title[:60]} — {_format_time(event.start)}" + (f" · {event.calendar_name[:30]}" if event.calendar_name else ""),
+        "callback_data": f"select:{token}:{i}",
+    }] for i, event in enumerate(choices, 1)]
+    buttons.append([{"text": "Cancel", "callback_data": f"select:{token}:cancel"}])
+    await telegram.send_message(chat_id, f"Which event should I {verb}? Tap an event below.\n" + "\n".join(lines) + "\nChoose within 5 minutes. You can also reply with a number.", {"inline_keyboard": buttons})
+
+
+async def handle_selection_callback(chat_id, callback_id, data, settings, telegram, calendar, parser, cron=None):
+    match = re.fullmatch(r"select:([a-f0-9]{32}):(cancel|[1-9]\d*)", data)
+    pending = pending_actions.get(chat_id)
+    if not match or not pending or pending.token != match.group(1) or pending.expires_at <= time.monotonic():
+        if pending and pending.expires_at <= time.monotonic():
+            pending_actions.pop(chat_id, None)
+        await telegram.answer_callback_query(callback_id, "This selection expired or was already used. Please send your request again.")
+        return
+    choice = match.group(2)
+    if choice != "cancel" and int(choice) > len(pending.events):
+        await telegram.answer_callback_query(callback_id, "Please choose one of the displayed events.")
+        return
+    pending_actions.pop(chat_id, None)
+    await telegram.answer_callback_query(callback_id)
+    if choice == "cancel":
+        await telegram.send_message(chat_id, "Selection cancelled.")
+        return
+    await _execute_selection(chat_id, pending, pending.events[int(choice) - 1], settings, telegram, calendar, parser, cron)
 
 
 def _selection(text: str, events: list[CalendarEvent]) -> CalendarEvent | None:
-    match = re.search(r"\b([1-9]\d*)\b", text)
+    match = re.fullmatch(r"\s*([1-9]\d*)\s*", text)
     if match and (index := int(match.group(1))) <= len(events):
         return events[index - 1]
     ordinals = {"first": 0, "second": 1, "third": 2, "fourth": 3, "fifth": 4}
