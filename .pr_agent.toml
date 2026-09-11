@@ -1,0 +1,57 @@
+# Repository review guidance for PR-Agent.
+# Options: https://github.com/The-PR-Agent/pr-agent/blob/main/pr_agent/settings/configuration.toml
+# Configure the model, credentials, and triggers in the workflow/environment.
+
+[config]
+repo_context_files = ["AGENTS.md", "spec/telegram-calendar-bot-spec.md", "README.md"]
+repo_context_max_lines = 1000
+repo_context_from_default_branch = true
+
+[pr_reviewer]
+num_max_findings = 5
+require_tests_review = true
+require_security_review = true
+require_score_review = false
+require_estimate_effort_to_review = false
+enable_review_labels_effort = false
+extra_instructions = """
+Review this Telegram scheduling bot against AGENTS.md and the relevant sections
+of spec/telegram-calendar-bot-spec.md. Treat explicit PR requirements as intended
+contract changes and check the changed spec, implementation, tests, and README
+for agreement. Default-branch context may predate the PR; account for its diff.
+If required context is unavailable, say so instead of inventing requirements.
+
+Prioritize concrete regressions introduced by this PR: incorrect scheduling,
+lost or duplicate deliveries/writes, cross-user access, and broken conversation
+flows. Check message and callback authorization, timezone and all-day boundaries,
+pending-state expiry/cancellation/replacement, repeated callbacks, calendar write
+permissions, conflicts, and partial external-service failures when affected.
+Independent reminders must not create calendar events.
+
+For each finding, identify the changed location, a reproducible trigger, its
+user-visible consequence, and the smallest practical fix. Distinguish observed
+bugs from uncertainties. Check meaningful regression coverage without demanding
+tests for documentation-only changes. Do not claim tests or live integrations
+were verified without evidence. Respect documented in-memory/restart limits.
+Avoid style-only findings, speculative infrastructure, and unrelated refactors.
+Report missing spec updates only where behavior or contracts actually changed.
+"""
+
+[pr_description]
+generate_ai_title = false
+enable_pr_diagram = false
+extra_instructions = """
+Lead with the problem and resulting user behavior. Summarize affected spec
+contracts, relevant tests, and material limitations. Include a brief example
+conversation for a new flow when useful. Do not claim deployment or test success
+without evidence, and do not describe unrelated existing features as new work.
+"""
+
+[pr_code_suggestions]
+focus_only_on_problems = true
+extra_instructions = """
+Suggest the smallest fixes within the PR's scope. Reuse existing helpers and
+clients before proposing abstractions or dependencies. Preserve the spec's
+authorization, scheduling, and reminder contracts. Avoid cosmetic rewrites,
+speculative optimizations, and changes to unrelated features.
+"""
