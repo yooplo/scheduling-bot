@@ -60,6 +60,8 @@ class PendingEventDraft:
 
 
 pending_event_drafts: dict[int, PendingEventDraft] = {}
+standalone_deliveries_in_flight: set[tuple[int, int]] = set()
+delivered_standalone_reminders: dict[tuple[int, int], float] = {}
 
 
 @dataclass
@@ -375,6 +377,8 @@ async def scheduled_standalone_reminder(request: Request, authorization: str | N
     if authorization != f"Bearer {settings.scheduler_secret}":
         raise HTTPException(status_code=401, detail="Invalid scheduler secret")
     payload = await request.json()
+    if not isinstance(payload, dict):
+        raise HTTPException(status_code=400, detail="Invalid standalone reminder")
     try:
         telegram_user_id = int(payload.get("telegram_user_id", 0))
         job_id = int(payload.get("job_id", 0))
@@ -383,12 +387,37 @@ async def scheduled_standalone_reminder(request: Request, authorization: str | N
     message = str(payload.get("message", "")).strip()
     if telegram_user_id not in calendars or not message or not job_id:
         raise HTTPException(status_code=400, detail="Invalid standalone reminder")
-    await telegram.send_message(telegram_user_id, f"⏰ {message}")
-    if cron:
+    retention_seconds = 86400
+    if "due_at" in payload:
         try:
-            await cron.delete_reminder(job_id)
-        except Exception:
-            logger.exception("Delivered standalone reminder but could not delete cron job job_id=%s", job_id)
+            due_at = datetime.fromisoformat(payload["due_at"])
+            if due_at.tzinfo is None:
+                raise ValueError("Missing timezone")
+        except (TypeError, ValueError):
+            raise HTTPException(status_code=400, detail="Invalid reminder due time")
+        now = datetime.now(due_at.tzinfo)
+        deadline = due_at + timedelta(minutes=CronJobClient.RECOVERY_MINUTES)
+        if now < due_at or now > deadline:
+            return Response(status_code=204)
+        retention_seconds = (deadline - now).total_seconds() + 60
+    for key, expiry in list(delivered_standalone_reminders.items()):
+        if expiry <= time.monotonic():
+            delivered_standalone_reminders.pop(key, None)
+    key = (telegram_user_id, job_id)
+    if key in standalone_deliveries_in_flight:
+        return Response(status_code=204)
+    standalone_deliveries_in_flight.add(key)
+    try:
+        if key not in delivered_standalone_reminders:
+            await telegram.send_message(telegram_user_id, f"⏰ {message}")
+            delivered_standalone_reminders[key] = time.monotonic() + retention_seconds
+        if cron:
+            try:
+                await cron.delete_reminder(job_id)
+            except Exception:
+                logger.exception("Delivered standalone reminder but could not delete cron job job_id=%s", job_id)
+    finally:
+        standalone_deliveries_in_flight.discard(key)
     return Response(status_code=204)
 
 

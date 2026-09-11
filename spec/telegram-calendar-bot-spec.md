@@ -42,7 +42,7 @@ Deterministic routing handles commands, common reminder forms, calendar manageme
 ### 3.2 Scheduled Notifications
 
 - `POST /scheduled/reminders` is called every minute by a fixed cron-job.org job. It validates `SCHEDULER_SECRET`, finds due event-linked reminders for every configured user, sends Telegram messages, and marks them sent in private event metadata.
-- Each independent reminder creates an expiring cron-job.org job through `CRON_JOB_API_KEY`. At its requested minute the job sends a secured `POST /scheduled/standalone-reminder` callback containing its job ID, Telegram user ID, and message. The endpoint sends Telegram and deletes the completed job. No Google Calendar event is created.
+- Each independent reminder creates an expiring cron-job.org job through `CRON_JOB_API_KEY`. The due minute and following five minutes are eligible for secured `POST /scheduled/standalone-reminder` callbacks containing the job ID, Telegram user ID, message, and absolute due time. The endpoint checks the delivery window, sends Telegram, and deletes the completed job. No Google Calendar event is created.
 - cron-job.org calls `POST /scheduled/daily-agenda` once daily at `DAILY_AGENDA_HOUR` in `USER_TIMEZONE`. The endpoint sends each configured user the upcoming events returned by the bot's one-day (24-hour) window.
 - Scheduler requests use an `Authorization: Bearer <SCHEDULER_SECRET>` header; direct unauthorised calls are rejected.
 - Users can add reminders while creating an event, request one for an existing event, or schedule an independent reminder. Existing-event reminders use the same event matching and disambiguation flow as edits and deletes. The `reminders` command combines both types chronologically and labels them as independent or event-linked.
@@ -341,7 +341,7 @@ selection compatibility, and private-chat webhook authorization.
 ### 8.5 Reminders, recurring events, conflicts, and free time
 - An event can have multiple attached reminders, each with optional custom Telegram text. `another`, `also`, or `additional` appends instead of replacing the current reminder metadata.
 - Reminder intent is determined before generic event creation. A due time or delay (`tonight at 11.50pm`, `tomorrow at 9am`, `in 15 minutes`, or `remind me in an hour to call Amelia`) creates an independent reminder. A lead time before a referenced event (`15 minutes before Dental`) invokes event matching and attaches the reminder.
-- An independent reminder is not linked to an existing event and never creates a Google Calendar entry. The bot creates an enabled cron-job.org job scheduled for the requested local minute with an expiry one day later. After creation it patches the secured callback body with the returned job ID. If that patch fails, creation is rolled back by deleting the incomplete job.
+- An independent reminder is not linked to an existing event and never creates a Google Calendar entry. The bot creates a disabled cron-job.org job covering the requested local minute and a five-minute recovery window. After creation it patches the secured callback body with the returned job ID and absolute due time, enabling the job in the same patch. If that patch fails, creation is rolled back by deleting the incomplete job. The job expires five minutes after its due time.
 - `reminders`, `/reminders`, and equivalent phrases combine unsent event-linked reminders from the next 30 days with active independent cron jobs, sorted chronologically. Output identifies `Independent reminder` or `Event reminder`; linked entries also show the event name and lead time. Long output is split below Telegram's message limit, and failure of one source does not suppress reminders retrieved from the other source.
 - The displayed reminder list is retained in memory for five minutes. `remove N`, `delete N`, or `cancel N` removes the selected reminder. Removing a standalone reminder deletes its cron-job.org job; removing an event-linked reminder removes only that reminder's metadata and preserves other reminders on the same event.
 - For an unqualified clock before the message delimiter—`at 11.55pm to book ... for 7 September`—the next occurrence of 11:55 PM is the due time and the later date remains message text. An explicit schedule date must occur before `to`, such as `at 11.55pm on 7 September to ...`.
@@ -352,6 +352,35 @@ selection compatibility, and private-chat webhook authorization.
 - Free-time requests scan upcoming events and report one-hour-or-longer gaps from 12:00 AM through 11:59 PM.
 
 ## 9. Error Handling
+
+Independent-reminder scheduling uses a five-minute recovery window: schedule
+the due minute and the following five minutes, deleting the job after delivery.
+New jobs remain disabled until their complete callback body (including the
+absolute `due_at`) is installed and they are enabled in the same update.
+The callback does not deliver before `due_at` or after the recovery deadline.
+Cron field combinations can match extra times at hour/day boundaries; the
+absolute timestamp guard prevents those matches from delivering early.
+Reminder lists show the original due time, not the next recovery attempt.
+New jobs use the `SchedulingBot reminder v2:` title prefix to distinguish their
+expiry-based due-time encoding from legacy jobs.
+
+Concurrent callbacks and repeated callbacks after a successful Telegram send
+are suppressed in the running process; failed sends can retry on the next
+scheduled minute, and failed job deletion is retried without sending again.
+This is bounded recovery, not guaranteed delivery: in-memory duplicate state
+is lost on restart, multiple worker processes do not share it, and an ambiguous
+Telegram network failure can still produce a duplicate. Legacy callbacks stay
+compatible, but existing missed jobs are not migrated automatically. No live
+delivery verification is implied by mocked tests.
+
+Regression coverage in `tests/test_cron_client.py` and
+`tests/test_standalone_delivery.py` checks recovery schedule boundaries,
+disabled creation and atomic activation, rollback on activation failure,
+original due-time listing, missed-minute recovery, early/expired callbacks,
+send/deletion failures, concurrent callbacks, legacy compatibility, and
+callback authentication. The observed incident had no cron-job.org execution
+history; the precise reason the first scheduled minute was missed remains
+unconfirmed. This change removes the single-attempt failure mode.
 
 - Google API errors (expired token, quota, network) → catch, log, reply
   with a generic "couldn't reach your calendar, try again" message —

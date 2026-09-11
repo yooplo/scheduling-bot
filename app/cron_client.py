@@ -14,6 +14,8 @@ class CronJobClient:
 
     API_URL = "https://api.cron-job.org"
     TITLE_PREFIX = "SchedulingBot reminder:"
+    RECOVERY_TITLE_PREFIX = "SchedulingBot reminder v2:"
+    RECOVERY_MINUTES = 5
 
     def __init__(self, api_key: str, service_base_url: str, scheduler_secret: str, timezone_name: str) -> None:
         self._headers = {"Authorization": f"Bearer {api_key}", "Content-Type": "application/json"}
@@ -30,12 +32,12 @@ class CronJobClient:
             job_id = int(response.json()["jobId"])
             extended_data = {
                 **job["extendedData"],
-                "body": json.dumps({"job_id": job_id, "telegram_user_id": telegram_user_id, "message": message}),
+                "body": json.dumps({"job_id": job_id, "telegram_user_id": telegram_user_id, "message": message, "due_at": due_at.isoformat()}),
             }
             try:
                 response = await client.patch(
                     f"{self.API_URL}/jobs/{job_id}", headers=self._headers,
-                    json={"job": {"extendedData": extended_data}},
+                    json={"job": {"extendedData": extended_data, "enabled": True}},
                 )
                 response.raise_for_status()
             except Exception:
@@ -44,19 +46,21 @@ class CronJobClient:
         return job_id
 
     def _job_payload(self, telegram_user_id: int, message: str, due_at: datetime) -> dict:
+        due_at = due_at.astimezone(ZoneInfo(self._timezone))
+        attempts = [due_at + timedelta(minutes=offset) for offset in range(self.RECOVERY_MINUTES + 1)]
         schedule = {
             "timezone": self._timezone,
-            "expiresAt": int((due_at + timedelta(days=1)).strftime("%Y%m%d%H%M%S")),
-            "hours": [due_at.hour],
-            "mdays": [due_at.day],
-            "minutes": [due_at.minute],
-            "months": [due_at.month],
+            "expiresAt": int(attempts[-1].strftime("%Y%m%d%H%M%S")),
+            "hours": sorted({at.hour for at in attempts}),
+            "mdays": sorted({at.day for at in attempts}),
+            "minutes": sorted({at.minute for at in attempts}),
+            "months": sorted({at.month for at in attempts}),
             "wdays": [-1],
         }
-        title = f"{self.TITLE_PREFIX}{telegram_user_id}:{message}"[:128]
+        title = f"{self.RECOVERY_TITLE_PREFIX}{telegram_user_id}:{message}"[:128]
         job = {
             "url": self._callback_url,
-            "enabled": True,
+            "enabled": False,
             "title": title,
             "saveResponses": False,
             "requestMethod": 1,
@@ -74,15 +78,20 @@ class CronJobClient:
             response = await client.get(f"{self.API_URL}/jobs", headers=self._headers)
             response.raise_for_status()
             jobs = response.json().get("jobs", [])
-        prefix = f"{self.TITLE_PREFIX}{telegram_user_id}:"
+        prefixes = (f"{self.RECOVERY_TITLE_PREFIX}{telegram_user_id}:", f"{self.TITLE_PREFIX}{telegram_user_id}:")
         reminders: list[ScheduledReminder] = []
         for job in jobs:
             title = job.get("title")
-            if not job.get("enabled") or not isinstance(title, str) or not title.startswith(prefix):
+            prefix = next((prefix for prefix in prefixes if isinstance(title, str) and title.startswith(prefix)), None)
+            if not job.get("enabled") or prefix is None:
                 continue
             schedule = job.get("schedule", {})
             try:
-                if job.get("nextExecution"):
+                if prefix == prefixes[0]:
+                    due_at = datetime.strptime(str(schedule["expiresAt"]), "%Y%m%d%H%M%S").replace(tzinfo=ZoneInfo(self._timezone)) - timedelta(minutes=self.RECOVERY_MINUTES)
+                    if datetime.now(ZoneInfo(self._timezone)) > due_at + timedelta(minutes=self.RECOVERY_MINUTES):
+                        continue
+                elif job.get("nextExecution"):
                     due_at = datetime.fromtimestamp(job["nextExecution"], tz=ZoneInfo(self._timezone))
                 else:
                     due_at = datetime(
