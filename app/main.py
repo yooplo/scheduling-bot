@@ -133,12 +133,17 @@ async def webhook(request: Request, x_telegram_bot_api_secret_token: str | None 
     if callback:
         chat_id = callback.get("message", {}).get("chat", {}).get("id")
         sender_id = callback.get("from", {}).get("id")
-        if callback.get("data", "").startswith(("conflict:", "select:")):
+        if callback.get("data", "").startswith(("conflict:", "select:", "help:")):
             if callback.get("message", {}).get("chat", {}).get("type") != "private" or chat_id != sender_id or sender_id not in calendars:
                 await telegram.answer_callback_query(callback.get("id", ""), "Not available here.")
                 return {"ok": True}
             try:
-                if callback["data"].startswith("select:"):
+                if callback["data"].startswith("help:"):
+                    topic = callback["data"].removeprefix("help:")
+                    await telegram.answer_callback_query(callback.get("id", ""))
+                    if topic == "menu" or topic in HELP_TOPICS:
+                        await _send_help(chat_id, telegram, topic)
+                elif callback["data"].startswith("select:"):
                     await handle_selection_callback(chat_id, callback.get("id", ""), callback["data"], settings, telegram, calendars[sender_id], parser, cron)
                 else:
                     await handle_conflict_callback(chat_id, callback.get("id", ""), callback["data"], settings, telegram, calendars[sender_id])
@@ -215,6 +220,19 @@ async def handle_group_schedule(
     """Serve full-detail, read-only schedules in the single allowed group."""
     lowered = text.lower()
     pending_key = (chat_id, sender_id)
+    if _telegram_command(text) == "help":
+        pending_group_schedule_dates.pop(pending_key, None)
+        buttons = [[{"text": f"@{account.telegram_username or account.telegram_user_id}",
+                     "callback_data": f"schedule:user:{account.telegram_user_id}"}]
+                   for account in settings.calendar_accounts]
+        await telegram.send_message(chat_id,
+            "Group help — read-only schedules\n\n"
+            "/schedule — choose a person and date\n"
+            "/schedule @username tomorrow — replace @username with a person below\n"
+            "check my schedule on 19 September\n\n"
+            "Use Yesterday / Tomorrow to step from the displayed date, Pick date to enter another date, "
+            "or Change person to compare schedules. Send /help anytime.", {"inline_keyboard": buttons})
+        return
     pending = pending_group_schedule_dates.get(pending_key)
     if pending and (pending[1] <= time.monotonic() or lowered.startswith("/")):
         pending_group_schedule_dates.pop(pending_key, None)
@@ -453,6 +471,14 @@ async def scheduled_standalone_reminder(request: Request, authorization: str | N
 async def handle_message(chat_id: int, text: str, settings: Settings, telegram: TelegramClient, calendar: CalendarClient, parser: GroqParser, cron: CronJobClient | None = None) -> None:
     command = _telegram_command(text)
     lowered = command if command in {"reminders", "calendars", "now"} else text.lower().strip()
+    if command == "help":
+        pending_event_drafts.pop(chat_id, None)
+        pending_event_conflicts.pop(chat_id, None)
+        pending_actions.pop(chat_id, None)
+        pending_calendar_deletions.pop(chat_id, None)
+        recent_reminder_lists.pop(chat_id, None)
+        await _send_help(chat_id, telegram)
+        return
     if command == "reminder_status" or lowered == "reminder status":
         pending_event_drafts.pop(chat_id, None)
         pending_event_conflicts.pop(chat_id, None)
@@ -1188,6 +1214,52 @@ def _format_time(value: datetime | None) -> str:
         return "time unavailable"
     hour = value.hour % 12 or 12
     return f"{value:%a} {value.day} {value:%b} {hour}:{value:%M} {value:%p}"
+
+
+HELP_TOPICS = {
+    "events": ("Events", "Events — send a message like:\n\n"
+        "Dentist tomorrow 2–3pm\n"
+        "add Friday whole day with Ames\n"
+        "Gym every Monday at 8pm for 1 hour\n"
+        "what are my plans tomorrow?\n"
+        "move Dentist to Friday at 4pm\n"
+        "delete Dentist tomorrow\n\n"
+        "I ask for missing dates, times, or duration. Tap an event if several match. "
+        "Conflicts offer Add anyway (or Apply anyway for edits) and Cancel. "
+        "Say 'weekly series' when editing or deleting all occurrences."),
+    "reminders": ("Reminders", "Reminders — send a message like:\n\n"
+        "remind me in 10 minutes to check the oven\n"
+        "remind me 15 minutes before Dental\n"
+        "add another reminder for Dental 1 hour before\n"
+        "/reminders — list upcoming reminders\n"
+        "/reminder_status — check delivery status\n"
+        "remove 2 — remove item 2 after listing reminders\n\n"
+        "Independent reminders send a Telegram message without creating an event. "
+        "Event reminders are attached to appointments. Status history has limits after a restart."),
+    "availability": ("Availability", "Availability — send a message like:\n\n"
+        "when am I free tmr?\n"
+        "when am I free on 19 September?\n"
+        "find free time this week\n\n"
+        "Results show gaps of at least one hour across your visible calendars, "
+        "from 12:00 AM to 11:59 PM. /now shows the current date, time, and timezone."),
+    "calendars": ("Calendars", "Calendars — send a message like:\n\n"
+        "/calendars — list calendars and colours\n"
+        "create calendar School\n"
+        "Team meeting tomorrow 2–3pm in Work calendar\n"
+        "delete calendar School\n\n"
+        "Deleting a calendar requires 'confirm delete calendar'; reply 'cancel' to stop. "
+        "The primary calendar cannot be deleted. Add events only to calendars you can write to."),
+}
+
+
+async def _send_help(chat_id, telegram, topic="menu"):
+    if topic == "menu":
+        text = "What would you like to do? Choose a category for example messages.\n\n/now — current date, time, and timezone\nSend /help anytime to return here."
+        buttons = [[{"text": title, "callback_data": f"help:{key}"}] for key, (title, _) in HELP_TOPICS.items()]
+    else:
+        text = HELP_TOPICS[topic][1]
+        buttons = [[{"text": "Back", "callback_data": "help:menu"}]]
+    await telegram.send_message(chat_id, text, {"inline_keyboard": buttons})
 
 
 def _welcome_message(first_name: str) -> str:

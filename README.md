@@ -18,6 +18,7 @@ All requests use `USER_TIMEZONE` (normally `Asia/Singapore`).
 | Add a recurring event | `Gym every Monday at 8pm` |
 | Start the bot | `/start` — receives a personalised welcome and examples |
 | List reminders | `/reminders` |
+| Discover features and examples | `/help` — Events, Reminders, Availability, and Calendars buttons |
 | Check reminder delivery status | `/reminder_status` or `reminder status` |
 | List calendars | `/calendars` |
 | Show current local time | `/now` |
@@ -143,6 +144,14 @@ Before `git add`, run `git status` and make sure `.env` and `client_secret.json`
 7. Send the bot a message such as `dentist tomorrow 2-3pm`, then `list`, then a delete request to verify the calendar flows.
 
 Render currently offers free Python web services, but they sleep after 15 minutes idle and can take about a minute to wake. Telegram retries failed webhook deliveries, so the bot should recover, but the first reply after idling can be delayed. Render free services also have ephemeral disks, which is why pending delete choices are intentionally short-lived in memory. See [Render's free-service limits](https://render.com/docs/free).
+
+## Help
+
+Use `/help` in private chat to browse feature categories and copy example
+messages. Each category has a Back button. In the configured group, `/help`
+shows only schedule help and person-selection buttons. Sending `/help` clears
+your pending conversation choices; browsing categories does not. The welcome
+message also points to `/help`.
 
 ## Event selection
 

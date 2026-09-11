@@ -182,6 +182,27 @@ plain text mode to avoid formatting bugs.
 
 ## 7. Command / Message Handling
 
+`/help` (including `/help@bot`) opens a private-chat menu with Events,
+Reminders, Availability, and Calendars buttons. Each category shows concise,
+plain-text examples that can be copied into a new message, plus a Back button.
+The menu also mentions `/now`. Examples cover all-day and recurring events,
+event selection and conflict choices, independent/event reminders and status,
+free-time queries, and calendar management. `/start` advertises `/help`.
+Help does not call Groq or perform calendar/reminder operations.
+
+In the configured group, `/help` shows only read-only schedule examples and
+buttons for configured users, reusing the existing user/date selection flow.
+Group help explains the result navigation buttons. Existing user and group
+authorization applies. Private category callbacks are rejected in groups or
+another user's chat, and unknown categories are acknowledged without action.
+Sending `/help` clears the sender's pending private conversation choices or
+group date prompt; browsing category buttons does not alter pending requests.
+Keep help examples aligned with this spec when supported features change.
+`tests/test_help.py` covers private categories and Back navigation, pending
+state handling, group scope, invalid topics, callback authorization, and the
+welcome link. Help responses are deterministic; live Telegram rendering is
+not verified by these mocked tests.
+
 `/reminder_status` (or `reminder status`) is a read-only view of scheduled,
 overdue/retrying, delivered, failed, expired, and disabled reminders. It combines
 calendar reminder metadata with cron-job.org job state and independent delivery
