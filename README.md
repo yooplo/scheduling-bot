@@ -18,6 +18,7 @@ All requests use `USER_TIMEZONE` (normally `Asia/Singapore`).
 | Add a recurring event | `Gym every Monday at 8pm` |
 | Start the bot | `/start` — receives a personalised welcome and examples |
 | List reminders | `/reminders` |
+| Check reminder delivery status | `/reminder_status` or `reminder status` |
 | List calendars | `/calendars` |
 | Show current local time | `/now` |
 | List the next 7 days | `list`, `upcoming`, or `schedule` |
@@ -145,12 +146,26 @@ Render currently offers free Python web services, but they sleep after 15 minute
 
 ## Event selection
 
+Edits that change an event's time are checked for overlaps at the proposed
+date, including dates beyond the next 30 days. A conflict offers **Apply anyway**
+and **Cancel**; the original event stays unchanged until you decide. The check
+excludes the event being edited. For recurring-series edits, it checks the
+selected occurrence's proposed interval, not every future occurrence.
+
 When an edit, deletion, or reminder request matches multiple events, tap the
 intended event's button, labelled with its title, date/time, and calendar.
 For example, `move Dentist to 4pm` may show two appointments; selecting one
 applies that change to it. Cancel dismisses the request. Choices expire after
 five minutes, and stale or repeated taps cannot execute the pending action.
 Plain numbers and ordinal replies such as `2` or `second` still work.
+
+## Duplicate message protection
+
+Incoming Telegram messages with the same `update_id` and chat are processed
+once per running process for 24 hours (up to 10,000 IDs). This includes concurrent
+deliveries and attempts that report errors after a possible external write.
+Send a new message to retry after checking the calendar. The protection is lost
+on restart and does not coordinate multiple worker processes.
 
 ## Test
 
@@ -174,6 +189,16 @@ For an existing event, say: `Set a reminder one day before IPPT` or `add another
 For an independent reminder, say: `remind me to pay the bill tomorrow at 9am`, `remind me in an hour to call Amelia`, `set me a reminder tonight at 11.50pm to book the court`, or `set a reminder in 15 minutes to shower`.
 
 Independent reminders are not associated with an existing event and create no Google Calendar entry. Each is persisted as an expiring cron-job.org job, delivered through a secured callback, and deleted after delivery. Event-linked reminders remain in private metadata on their corresponding Calendar events. Both types appear together under `reminders`; long lists are split across Telegram messages, and a temporary numbered list enables `remove N`.
+
+Use `/reminder_status` to see Scheduled, Overdue/retrying, Delivered, Failed,
+Expired, or Disabled status where evidence is available. For example, after
+`remind me in 1 minute to sleep`, this view can show the scheduled reminder,
+then its observed delivery. Expired means its delivery window ended without
+confirmation; a scheduler failure is not proof that Telegram received nothing.
+Independent delivered/failed observations remain visible for 24 hours in the
+running process and disappear on restart. Calendar sent flags supply event
+reminder status. Source outages are labelled, and this read-only status view
+does not make its numbers actionable for reminder removal.
 
 After upgrading from the previous calendar-backed implementation, existing pending records remain deliverable and are deleted as they fire. Once no legacy reminders remain, the old `Telegram Reminders` calendar can be deleted manually from Google Calendar.
 

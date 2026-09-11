@@ -26,6 +26,7 @@ def delivery(monkeypatch):
         return await main.scheduled_standalone_reminder(request, secret)
     yield call, payload, telegram, cron
     main.delivered_standalone_reminders.clear()
+    main.reminder_delivery_history.clear()
     main.standalone_deliveries_in_flight.clear()
 
 
@@ -34,6 +35,7 @@ async def test_missed_due_minute_delivers_on_recovery_attempt_once(delivery):
     call, _, telegram, cron = delivery
     await asyncio.gather(call(), call())
     telegram.send_message.assert_awaited_once_with(123, "⏰ sleep")
+    assert main.reminder_delivery_history[(123, 42)][1].status == "Delivered"
     cron.delete_reminder.assert_awaited()
 
 
@@ -53,6 +55,7 @@ async def test_failed_telegram_send_can_retry(delivery):
     telegram.send_message.side_effect = [RuntimeError("network failure"), None]
     with pytest.raises(RuntimeError):
         await call()
+    assert main.reminder_delivery_history[(123, 42)][1].status == "Failed (delivery not confirmed)"
     assert (await call()).status_code == 204
     assert telegram.send_message.await_count == 2
 

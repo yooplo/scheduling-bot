@@ -62,15 +62,19 @@ class PendingEventDraft:
 pending_event_drafts: dict[int, PendingEventDraft] = {}
 standalone_deliveries_in_flight: set[tuple[int, int]] = set()
 delivered_standalone_reminders: dict[tuple[int, int], float] = {}
+reminder_delivery_history: dict[tuple[int, int], tuple[float, ScheduledReminder]] = {}
+processed_message_updates: dict[tuple[int, int], float] = {}
 
 
 @dataclass
 class PendingEventConflict:
-    event: ParsedEvent
+    event: ParsedEvent | ParsedEdit
     request_text: str
     now: datetime
     token: str
     expires_at: float
+    existing: CalendarEvent | None = None
+    series: bool = False
 
 
 pending_event_conflicts: dict[int, PendingEventConflict] = {}
@@ -168,6 +172,19 @@ async def webhook(request: Request, x_telegram_bot_api_secret_token: str | None 
     if calendar is None:
         await telegram.send_message(chat_id, _unauthorised_message())
         return {"ok": True}
+    update_id = update.get("update_id")
+    if isinstance(update_id, int):
+        now = time.monotonic()
+        for key, expiry in list(processed_message_updates.items()):
+            if expiry <= now:
+                processed_message_updates.pop(key, None)
+        key = (chat_id, update_id)
+        if key in processed_message_updates:
+            return {"ok": True}
+        if len(processed_message_updates) >= 10000:
+            processed_message_updates.pop(next(iter(processed_message_updates)))
+        # Record before awaiting: a failed response may follow a successful write.
+        processed_message_updates[key] = now + 86400
     try:
         if chat.get("type") in {"group", "supergroup"}:
             await handle_group_schedule(chat_id, sender_id, text, settings, telegram, calendars)
@@ -409,7 +426,19 @@ async def scheduled_standalone_reminder(request: Request, authorization: str | N
     standalone_deliveries_in_flight.add(key)
     try:
         if key not in delivered_standalone_reminders:
-            await telegram.send_message(telegram_user_id, f"⏰ {message}")
+            for history_key, (expiry, _) in list(reminder_delivery_history.items()):
+                if expiry <= time.monotonic():
+                    reminder_delivery_history.pop(history_key, None)
+            observed = ScheduledReminder(event_id=f"cron:{job_id}", reminder=ReminderSpec(message=message),
+                due_at=due_at if "due_at" in payload else datetime.now().astimezone(), standalone=True)
+            try:
+                await telegram.send_message(telegram_user_id, f"⏰ {message}")
+            except Exception:
+                observed.status = "Failed (delivery not confirmed)"
+                reminder_delivery_history[key] = (time.monotonic() + 86400, observed)
+                raise
+            observed.status = "Delivered"
+            reminder_delivery_history[key] = (time.monotonic() + 86400, observed)
             delivered_standalone_reminders[key] = time.monotonic() + retention_seconds
         if cron:
             try:
@@ -424,9 +453,16 @@ async def scheduled_standalone_reminder(request: Request, authorization: str | N
 async def handle_message(chat_id: int, text: str, settings: Settings, telegram: TelegramClient, calendar: CalendarClient, parser: GroqParser, cron: CronJobClient | None = None) -> None:
     command = _telegram_command(text)
     lowered = command if command in {"reminders", "calendars", "now"} else text.lower().strip()
+    if command == "reminder_status" or lowered == "reminder status":
+        pending_event_drafts.pop(chat_id, None)
+        pending_event_conflicts.pop(chat_id, None)
+        pending_actions.pop(chat_id, None)
+        recent_reminder_lists.pop(chat_id, None)
+        await _show_reminder_status(chat_id, telegram, calendar, cron)
+        return
     conflict = pending_event_conflicts.get(chat_id)
     if conflict:
-        choice = {"add anyway": "add", "change time": "change", "cancel": "cancel", "/cancel": "cancel"}.get(lowered)
+        choice = {"add anyway": "add", "apply anyway": "add", "change time": "change", "cancel": "cancel", "/cancel": "cancel"}.get(lowered)
         if choice:
             await handle_conflict_callback(chat_id, "", f"conflict:{conflict.token}:{choice}", settings, telegram, calendar)
             return
@@ -738,7 +774,12 @@ async def handle_conflict_callback(chat_id, callback_id, data, settings, telegra
         await telegram.answer_callback_query(callback_id)
     action = match.group(2)
     if action == "cancel":
-        await telegram.send_message(chat_id, "Event creation cancelled.")
+        await telegram.send_message(chat_id, "Event edit cancelled." if pending.existing else "Event creation cancelled.")
+    elif pending.existing:
+        if action != "add":
+            await telegram.send_message(chat_id, "Please send a new edit request to change the time.")
+            return
+        await _commit_edit(chat_id, pending.existing, pending.event, pending.series, telegram, calendar)
     elif action == "change":
         duration = (pending.event.end - pending.event.start).total_seconds() / 60
         text = _event_parser_text(pending.request_text)
@@ -798,7 +839,7 @@ async def _remove_scheduled_reminder(reminder: ScheduledReminder, calendar: Cale
 
 async def _edit_event(chat_id: int, text: str, existing: CalendarEvent, settings: Settings, telegram: TelegramClient, calendar: CalendarClient, parser: GroqParser) -> None:
     location_match = re.search(r"\b(?:to\s+be\s+)?at\s+(.+?)\s*$", text, flags=re.IGNORECASE)
-    if location_match:
+    if location_match and not _has_explicit_event_time(text):
         edited = ParsedEdit(
             title=existing.title, start=existing.start, end=existing.end or existing.start,
             location=location_match.group(1).strip(), confidence="high", all_day=existing.all_day,
@@ -809,8 +850,30 @@ async def _edit_event(chat_id: int, text: str, existing: CalendarEvent, settings
     if edited.confidence == "low" or edited.start.tzinfo is None or edited.end.tzinfo is None:
         await telegram.send_message(chat_id, "I need a clearer change. For example: 'move IPPT on Saturday to 4pm'.")
         return
-    if _is_series_edit(text, existing):
+    if edited.end <= edited.start:
+        await telegram.send_message(chat_id, "Please give an end time after the start.")
+        return
+    series = _is_series_edit(text, existing)
+    if series:
         _apply_recurrence_from_text(edited, text)
+    if edited.start != existing.start or edited.end != existing.end or edited.recurrence:
+        events = await asyncio.to_thread(calendar._list_events_between, edited.start, edited.end)
+        conflicts = [event for event in events
+            if (event.event_id, event.calendar_id) != (existing.event_id, existing.calendar_id)
+            and event.start < edited.end and (event.end or event.start) > edited.start]
+        if conflicts:
+            token = uuid4().hex
+            pending_event_conflicts[chat_id] = PendingEventConflict(edited, text, datetime.now(settings.timezone), token,
+                time.monotonic() + PENDING_TTL_SECONDS, existing, series)
+            details = "\n".join(f"• {event.title} — {_format_event_range(event)}" for event in conflicts[:3])
+            await telegram.send_message(chat_id, f"⚠️ This edit overlaps with:\n{details}\n\nProposed: {edited.title} — {_format_event_range(edited)}\nChoose within 5 minutes.",
+                {"inline_keyboard": [[{"text": "Apply anyway", "callback_data": f"conflict:{token}:add"}, {"text": "Cancel", "callback_data": f"conflict:{token}:cancel"}]]})
+            return
+    await _commit_edit(chat_id, existing, edited, series, telegram, calendar)
+
+
+async def _commit_edit(chat_id, existing, edited, series, telegram, calendar):
+    if series:
         updated = await asyncio.to_thread(calendar.update_series, existing, edited)
         await telegram.send_message(chat_id, _format_series_update_confirmation(updated, edited.recurrence))
         return
@@ -1136,8 +1199,8 @@ def _welcome_message(first_name: str) -> str:
         "• What are my plans on 19 Aug?\n"
         "• When am I free tomorrow?\n"
         "• Remind me 30 minutes before IPPT\n\n"
-        "Commands: /reminders · /calendars · /now\n"
-        "Send ‘list’ to see upcoming events."
+        "Commands: /reminders · /reminder_status · /calendars · /now\n"
+        "Send /help to explore features, or ‘list’ to see upcoming events."
     )
 
 
@@ -1223,6 +1286,37 @@ def _calendar_colour_emoji(hex_colour: str | None) -> str:
     if hue < 0.90:
         return "🟪"
     return "🟥"
+
+
+async def _show_reminder_status(chat_id, telegram, calendar, cron):
+    reminders = []
+    unavailable = []
+    try:
+        reminders.extend(await asyncio.to_thread(calendar.list_reminders, 30, include_sent=True))
+    except Exception:
+        logger.exception("Could not retrieve calendar reminder status chat_id=%s", chat_id)
+        unavailable.append("Google Calendar")
+    if cron:
+        try:
+            reminders.extend(await cron.list_reminders(chat_id, include_history=True))
+        except Exception:
+            logger.exception("Could not retrieve independent reminder status chat_id=%s", chat_id)
+            unavailable.append("independent reminders")
+    else:
+        unavailable.append("independent reminders (not configured)")
+    for key, (expiry, observed) in list(reminder_delivery_history.items()):
+        if expiry <= time.monotonic():
+            reminder_delivery_history.pop(key, None)
+        elif key[0] == chat_id:
+            reminders = [item for item in reminders if not (item.standalone and item.event_id == observed.event_id)]
+            reminders.append(observed)
+    reminders.sort(key=lambda item: item.due_at)
+    lines = [f"{_format_reminder_listing(item, i)}\n   Status: {item.status}" for i, item in enumerate(reminders, 1)]
+    footer = "Independent delivery history covers observations from this process for 24 hours and is lost on restart."
+    if unavailable:
+        footer += f"\nUnavailable: {', '.join(unavailable)}."
+    for message in _chunk_section_message("Reminder status:", lines or ["No reminder records found."], footer):
+        await telegram.send_message(chat_id, message)
 
 
 def _format_reminder_listing(reminder: ScheduledReminder, index: int) -> str:
