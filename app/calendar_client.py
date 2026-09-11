@@ -153,15 +153,16 @@ class CalendarClient:
     def delete_series(self, event: CalendarEvent) -> None:
         self._service.events().delete(calendarId=event.calendar_id or self._calendar_id, eventId=event.recurring_event_id or event.event_id).execute()
 
-    def list_reminders(self, days_ahead: int = 30) -> list[ScheduledReminder]:
+    def list_reminders(self, days_ahead: int = 30, include_sent: bool = False) -> list[ScheduledReminder]:
         now = datetime.now(timezone.utc)
         reminders: list[ScheduledReminder] = []
         for event in self._list_events_between(now - timedelta(days=8), now + timedelta(days=days_ahead), include_internal=True):
             for reminder in event.reminders:
-                if reminder.sent:
+                if reminder.sent and not include_sent:
                     continue
                 due_at = event.start if event.is_standalone_reminder else event.start - timedelta(minutes=reminder.minutes_before or 0)
-                reminders.append(ScheduledReminder(event_id=event.event_id, calendar_id=event.calendar_id, reminder=reminder, due_at=due_at, event_title=None if event.is_standalone_reminder else event.title, standalone=event.is_standalone_reminder))
+                reminders.append(ScheduledReminder(event_id=event.event_id, calendar_id=event.calendar_id, reminder=reminder, due_at=due_at, event_title=None if event.is_standalone_reminder else event.title, standalone=event.is_standalone_reminder,
+                    status="Delivered" if reminder.sent else "Overdue" if due_at < now else "Scheduled"))
         return sorted(reminders, key=lambda reminder: reminder.due_at)
 
     def list_standalone_reminder_events(self, days_ahead: int = 30) -> list[CalendarEvent]:

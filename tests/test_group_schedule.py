@@ -260,7 +260,7 @@ async def test_command_cancels_pending_specific_date(command):
             assert reply.startswith("@alice")
         else:
             calendar.list_events_for_day.assert_not_called()
-            assert reply == ("Group access is read-only. Ask me to check a schedule." if command == "/help" else "Whose schedule?")
+            assert reply.startswith("Group help — read-only schedules") if command == "/help" else reply == "Whose schedule?"
     finally:
         pending_group_schedule_dates.pop((-100123, 111), None)
         pending_group_schedule_dates.pop((-100123, 222), None)

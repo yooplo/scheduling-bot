@@ -105,3 +105,4 @@ class ScheduledReminder(BaseModel):
     due_at: datetime
     event_title: str | None = None
     standalone: bool = False
+    status: str = "Scheduled"

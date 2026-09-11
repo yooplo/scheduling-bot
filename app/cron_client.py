@@ -73,7 +73,7 @@ class CronJobClient:
         }
         return job
 
-    async def list_reminders(self, telegram_user_id: int) -> list[ScheduledReminder]:
+    async def list_reminders(self, telegram_user_id: int, include_history: bool = False) -> list[ScheduledReminder]:
         async with httpx.AsyncClient(timeout=20) as client:
             response = await client.get(f"{self.API_URL}/jobs", headers=self._headers)
             response.raise_for_status()
@@ -83,14 +83,16 @@ class CronJobClient:
         for job in jobs:
             title = job.get("title")
             prefix = next((prefix for prefix in prefixes if isinstance(title, str) and title.startswith(prefix)), None)
-            if not job.get("enabled") or prefix is None:
+            if prefix is None or (not job.get("enabled") and not include_history):
                 continue
             schedule = job.get("schedule", {})
             try:
                 if prefix == prefixes[0]:
                     due_at = datetime.strptime(str(schedule["expiresAt"]), "%Y%m%d%H%M%S").replace(tzinfo=ZoneInfo(self._timezone)) - timedelta(minutes=self.RECOVERY_MINUTES)
-                    if datetime.now(ZoneInfo(self._timezone)) > due_at + timedelta(minutes=self.RECOVERY_MINUTES):
+                    if not include_history and datetime.now(ZoneInfo(self._timezone)) > due_at + timedelta(minutes=self.RECOVERY_MINUTES):
                         continue
+                elif include_history and schedule.get("expiresAt"):
+                    due_at = datetime.strptime(str(schedule["expiresAt"]), "%Y%m%d%H%M%S").replace(tzinfo=ZoneInfo(self._timezone)) - timedelta(days=1)
                 elif job.get("nextExecution"):
                     due_at = datetime.fromtimestamp(job["nextExecution"], tz=ZoneInfo(self._timezone))
                 else:
@@ -103,9 +105,22 @@ class CronJobClient:
             except (KeyError, IndexError, TypeError, ValueError):
                 continue
             try:
+                now = datetime.now(ZoneInfo(self._timezone))
+                if include_history and due_at < now - timedelta(days=1):
+                    continue
+                deadline = due_at + timedelta(minutes=self.RECOVERY_MINUTES) if prefix == prefixes[0] else due_at
+                status = "Scheduled"
+                if job.get("lastStatus", 0) not in (0, 1):
+                    status = "Failed scheduler attempt" + (" (retry window open)" if now <= deadline and job.get("enabled") else "")
+                elif now > deadline:
+                    status = "Expired (delivery unconfirmed)"
+                elif not job.get("enabled"):
+                    status = "Disabled"
+                elif now >= due_at:
+                    status = "Overdue / retrying"
                 reminders.append(ScheduledReminder(
                     event_id=f"cron:{int(job['jobId'])}", reminder=ReminderSpec(message=title[len(prefix):] or "Reminder"),
-                    due_at=due_at, standalone=True,
+                    due_at=due_at, standalone=True, status=status,
                 ))
             except (KeyError, TypeError, ValueError):
                 continue

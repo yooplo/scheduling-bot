@@ -182,6 +182,49 @@ plain text mode to avoid formatting bugs.
 
 ## 7. Command / Message Handling
 
+`/help` (including `/help@bot`) opens a private-chat menu with Events,
+Reminders, Availability, and Calendars buttons. Each category shows concise,
+plain-text examples that can be copied into a new message, plus a Back button.
+The menu also mentions `/now`. Examples cover all-day and recurring events,
+event selection and conflict choices, independent/event reminders and status,
+free-time queries, and calendar management. `/start` advertises `/help`.
+Help does not call Groq or perform calendar/reminder operations.
+
+In the configured group, `/help` shows only read-only schedule examples and
+buttons for configured users, reusing the existing user/date selection flow.
+Group help explains the result navigation buttons. Existing user and group
+authorization applies. Private category callbacks are rejected in groups or
+another user's chat, and unknown categories are acknowledged without action.
+Sending `/help` clears the sender's pending private conversation choices or
+group date prompt; browsing category buttons does not alter pending requests.
+Keep help examples aligned with this spec when supported features change.
+`tests/test_help.py` covers private categories and Back navigation, pending
+state handling, group scope, invalid topics, callback authorization, and the
+welcome link. Help responses are deterministic; live Telegram rendering is
+not verified by these mocked tests.
+
+`/reminder_status` (or `reminder status`) is a read-only view of scheduled,
+overdue/retrying, delivered, failed, expired, and disabled reminders. It combines
+calendar reminder metadata with cron-job.org job state and independent delivery
+results observed by this process during the last 24 hours. A failed scheduler
+request is not proof of failed Telegram delivery; locally observed successful
+sends take precedence. Deleted independent jobs have no remote history in this
+view; their observed status is lost on restart. Source failures are labelled,
+and this view does not install numbered reminder-removal selections.
+
+Authenticated Telegram message updates are deduplicated by chat and `update_id`
+before executing a command, including concurrent deliveries. IDs are retained
+for 24 hours, up to 10,000 entries per process. Failed attempts remain recorded
+because an external write may already have succeeded; the user receives the
+existing error response and must send a new request to retry. Missing IDs retain
+legacy handling. This protection is not shared across workers or restarts.
+
+Regression coverage in `tests/test_reliability_features.py` checks repeated,
+concurrent, failed, expired, and unauthorized message updates; saved-edit
+conflicts and cancellation; status merging, source outages, and user isolation.
+`tests/test_cron_client.py` covers scheduler status classification, while
+`tests/test_standalone_delivery.py` checks observed send outcomes.
+
 Messages are routed deterministically where possible, with Groq used only when semantic extraction or matching is needed. Slash commands are optional aliases for common read-only actions:
 
 | User intent (examples) | Detected action |
@@ -332,6 +375,17 @@ selection compatibility, and private-chat webhook authorization.
    pending state and treat as a new message
 
 ### 8.4 Edit event
+
+When an edit changes start/end or recurrence, check the proposed interval
+against calendar events in that interval, excluding the edited event by both
+calendar and event ID. On overlap, retain the edit for five minutes and show
+Apply anyway and Cancel buttons; selecting Apply anyway performs the saved
+edit without reparsing. It never creates another event. Repeated/stale buttons,
+authorization, cancellation, and replacement follow the existing conflict
+flow. The check covers the displayed occurrence's proposed interval, including
+dates beyond 30 days, not every future occurrence of a recurring series.
+Location-only edits do not need a conflict check. Invalid time ranges are
+rejected. Supplied clock times must not be mistaken for location text.
 1. Detect an edit keyword such as "change", "move", "reschedule", or "update"
 2. Fetch upcoming events for the next 30 days and match the referenced event
 3. If ambiguous, present candidate buttons and retain the original edit request for five minutes

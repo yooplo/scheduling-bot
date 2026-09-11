@@ -125,3 +125,28 @@ async def test_malformed_cron_jobs_are_ignored(monkeypatch):
     client = CronJobClient("api-key", "https://bot.example.com", "secret", "Asia/Singapore")
 
     assert await client.list_reminders(987) == []
+
+
+@pytest.mark.asyncio
+async def test_status_view_includes_expired_failed_and_disabled_jobs(monkeypatch):
+    import httpx
+    from zoneinfo import ZoneInfo
+
+    class Clock(datetime):
+        @classmethod
+        def now(cls, tz=None):
+            return cls(2030, 9, 11, 21, 44, tzinfo=ZoneInfo("Asia/Singapore"))
+    monkeypatch.setattr("app.cron_client.datetime", Clock)
+    jobs = [
+        {"jobId":1,"enabled":True,"title":"SchedulingBot reminder v2:987:expired","schedule":{"expiresAt":20300911214000}},
+        {"jobId":2,"enabled":True,"title":"SchedulingBot reminder v2:987:failed","schedule":{"expiresAt":20300911214800},"lastStatus":5},
+        {"jobId":3,"enabled":False,"title":"SchedulingBot reminder v2:987:disabled","schedule":{"expiresAt":20300911220000}},
+        {"jobId":4,"enabled":True,"title":"SchedulingBot reminder v2:987:scheduled","schedule":{"expiresAt":20300911220000}},
+        {"jobId":5,"enabled":True,"title":"SchedulingBot reminder v2:987:retrying","schedule":{"expiresAt":20300911214800}},
+        {"jobId":6,"enabled":True,"title":"SchedulingBot reminder v2:456:private","schedule":{"expiresAt":20300911214800}},
+    ]
+    original=httpx.AsyncClient
+    monkeypatch.setattr("app.cron_client.httpx.AsyncClient",lambda **kwargs:original(transport=httpx.MockTransport(lambda r:httpx.Response(200,json={"jobs":jobs})),**kwargs))
+    client=CronJobClient("key","https://bot.example.com","secret","Asia/Singapore")
+    status={r.reminder.message:r.status for r in await client.list_reminders(987,include_history=True)}
+    assert status == {"expired":"Expired (delivery unconfirmed)","failed":"Failed scheduler attempt (retry window open)","disabled":"Disabled","scheduled":"Scheduled","retrying":"Overdue / retrying"}
