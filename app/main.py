@@ -606,6 +606,9 @@ async def handle_message(chat_id: int, text: str, settings: Settings, telegram: 
         if standalone.confidence == "low" or standalone.due_at.tzinfo is None:
             await telegram.send_message(chat_id, "Tell me what to remind you about and when, for example: 'remind me to pay the bill tomorrow at 9am'.")
             return
+        if standalone.due_at <= now:
+            await telegram.send_message(chat_id, "That reminder time is in the past. Please specify a future date and time.")
+            return
         await cron.create_reminder(chat_id, standalone.message, standalone.due_at)
         await telegram.send_message(chat_id, f"⏰ Reminder set: {standalone.message}\n📅 {_format_time(standalone.due_at)}")
     elif "reminder" in lowered and any(word in lowered for word in ("remove", "disable", "cancel", "delete")):
@@ -938,7 +941,7 @@ def _is_standalone_reminder_request(text: str) -> bool:
     if re.search(r"\b(?:minutes?|mins?|hours?|hrs?|days?)\s+before\b", lowered):
         return False
     command = re.match(
-        r"^(?:please\s+)?(?:set(?:\s+me)?|add)(?:\s+up)?\s+(?:a\s+)?reminder\b",
+        r"^(?:please\s+)?(?:remind\s+me|(?:set(?:\s+me)?|add)(?:\s+up)?\s+(?:a\s+)?reminder)\b",
         lowered,
     )
     if not command:
@@ -1453,7 +1456,7 @@ def _reminders_from_text(text: str) -> list[ReminderSpec]:
 
 
 def _apply_standalone_clock_from_text(reminder, text: str, now: datetime) -> None:
-    """Keep dates inside reminder text from overriding an unqualified clock time."""
+    """Resolve simple local clocks without using dates inside the reminder message."""
     command = re.match(
         r"^(?:(?:set|add)(?:\s+me)?\s+(?:a\s+)?reminder|remind\s+me)\b(?P<schedule>.*?)\bto\b",
         text.strip(), flags=re.IGNORECASE,
@@ -1463,7 +1466,7 @@ def _apply_standalone_clock_from_text(reminder, text: str, now: datetime) -> Non
     schedule = command.group("schedule")
     clock = re.search(r"\b(?:at\s+)?(\d{1,2})(?:[:.](\d{2}))?\s*(am|pm)\b", schedule, flags=re.IGNORECASE)
     if not clock or re.search(
-        r"\b(?:today|tonight|tomorrow|tmr|on|"
+        r"\b(?:on|"
         r"monday|tuesday|wednesday|thursday|friday|saturday|sunday|"
         r"jan(?:uary)?|feb(?:ruary)?|mar(?:ch)?|apr(?:il)?|may|jun(?:e)?|"
         r"jul(?:y)?|aug(?:ust)?|sep(?:t(?:ember)?)?|oct(?:ober)?|nov(?:ember)?|dec(?:ember)?)\b",
@@ -1479,7 +1482,11 @@ def _apply_standalone_clock_from_text(reminder, text: str, now: datetime) -> Non
     elif clock.group(3).lower() == "am" and hour == 12:
         hour = 0
     due_at = now.replace(hour=hour, minute=minute, second=0, microsecond=0)
-    if due_at <= now:
+    relative_day = re.search(r"\b(today|tonight|tomorrow|tmr)\b", schedule, flags=re.IGNORECASE)
+    if relative_day:
+        if relative_day.group(1).lower() in {"tomorrow", "tmr"}:
+            due_at += timedelta(days=1)
+    elif due_at <= now:
         due_at += timedelta(days=1)
     reminder.due_at = due_at
 

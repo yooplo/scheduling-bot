@@ -60,6 +60,8 @@ now - Tells you the date and time now
 
 Reminder wording determines whether a notification is independent or event-linked:
 
+- `remind me tmr at around 12pm to collect shopee parcel at j9` schedules an independent reminder for tomorrow at noon in the home timezone. `set a reminder tmr at 12pm to ...` works too. Past reminder times are rejected; send a future date and time.
+
 - A due time or delay creates an independent reminder: `tonight at 11.50pm`, `tomorrow at 9am`, or `in 15 minutes`.
 - A lead time before a named event links the reminder to that event: `15 minutes before Dental` or `one day before IPPT`.
 - `reminders` lists both types chronologically. Independent reminders are labelled `🔔 Independent reminder`; attached reminders are labelled `🔗 Event reminder` and show the calendar event.
