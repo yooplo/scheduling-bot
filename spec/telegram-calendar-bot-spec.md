@@ -423,6 +423,20 @@ expiry-based due-time encoding from legacy jobs.
 Concurrent callbacks and repeated callbacks after a successful Telegram send
 are suppressed in the running process; failed sends can retry on the next
 scheduled minute, and failed job deletion is retried without sending again.
+Rescheduling uses the same per-user/job in-flight guard as delivery. An edit
+while delivery is running asks the user to retry; callbacks during an edit
+do no work and can retry on a subsequent scheduled minute. Only a successful
+schedule update clears that job's delivered marker and observed status history;
+failed updates preserve both and always release the guard. Before sending or
+deleting, a callback checks its user, job, message, and due time against the
+current cron job's stored callback body. Stale callbacks (including legacy
+callbacks without a due time after a reschedule) and deleted jobs do no work,
+even after restart. This adds one cron API read per eligible callback; API
+failures prevent delivery and deletion so a later recovery attempt can retry.
+If an update was applied remotely but its response was lost, a verified callback
+for the new due time clears tracking for the old due time before delivery.
+Regression coverage includes failed deletion followed by rescheduling, old
+callbacks, successful new delivery, failed updates, and overlapping operations.
 This is bounded recovery, not guaranteed delivery: in-memory duplicate state
 is lost on restart, multiple worker processes do not share it, and an ambiguous
 Telegram network failure can still produce a duplicate. Legacy callbacks stay

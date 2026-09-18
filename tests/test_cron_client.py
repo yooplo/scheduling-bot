@@ -186,3 +186,45 @@ async def test_update_preserves_full_message_and_checks_ownership(monkeypatch, o
     else:
         await client.update_reminder(42, 987, due)
         assert [r.method for r in requests] == ['GET', 'PATCH']
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("change,expected", [
+    ({}, True),
+    ({"due_at": "2030-09-11T21:45:00+08:00"}, False),
+    ({"telegram_user_id": 999}, False),
+    ({"job_id": 99}, False),
+    ({"message": "changed"}, False),
+])
+async def test_callback_must_match_current_job(monkeypatch, change, expected):
+    import json
+    import httpx
+
+    original_body = {"job_id": 42, "telegram_user_id": 987, "message": "sleep",
+        "due_at": "2030-09-11T21:43:00+08:00"}
+    def handle(request):
+        assert request.method == "GET" and request.url.path == "/jobs/42"
+        return httpx.Response(200, json={"jobDetails": {
+            "url": "https://bot.example.com/scheduled/standalone-reminder",
+            "extendedData": {"body": json.dumps({**original_body, **change})}}})
+    original = httpx.AsyncClient
+    monkeypatch.setattr("app.cron_client.httpx.AsyncClient", lambda **kwargs: original(transport=httpx.MockTransport(handle), **kwargs))
+    client = CronJobClient("key", "https://bot.example.com", "secret", "Asia/Singapore")
+    assert await client.is_current_reminder(42, 987, "sleep", original_body["due_at"]) is expected
+    assert await client.is_current_reminder(42, 987, "sleep", None) is False
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("status", [404, 500])
+async def test_callback_lookup_missing_job_or_api_failure(monkeypatch, status):
+    import httpx
+
+    original = httpx.AsyncClient
+    monkeypatch.setattr("app.cron_client.httpx.AsyncClient", lambda **kwargs: original(
+        transport=httpx.MockTransport(lambda request: httpx.Response(status)), **kwargs))
+    client = CronJobClient("key", "https://bot.example.com", "secret", "Asia/Singapore")
+    if status == 404:
+        assert await client.is_current_reminder(42, 987, "sleep", None) is False
+    else:
+        with pytest.raises(httpx.HTTPStatusError):
+            await client.is_current_reminder(42, 987, "sleep", None)

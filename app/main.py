@@ -443,6 +443,15 @@ async def scheduled_standalone_reminder(request: Request, authorization: str | N
         return Response(status_code=204)
     standalone_deliveries_in_flight.add(key)
     try:
+        if not cron:
+            raise HTTPException(status_code=503, detail="Independent reminders are not configured")
+        if not await cron.is_current_reminder(job_id, telegram_user_id, message, payload.get("due_at")):
+            return Response(status_code=204)
+        observed_delivery = reminder_delivery_history.get(key)
+        if "due_at" in payload and observed_delivery and observed_delivery[1].due_at != due_at:
+            # The remote update may have succeeded even if its response was lost.
+            delivered_standalone_reminders.pop(key, None)
+            reminder_delivery_history.pop(key, None)
         if key not in delivered_standalone_reminders:
             for history_key, (expiry, _) in list(reminder_delivery_history.items()):
                 if expiry <= time.monotonic():
@@ -542,9 +551,20 @@ async def handle_message(chat_id: int, text: str, settings: Settings, telegram: 
         if due_at <= datetime.now(settings.timezone):
             await telegram.send_message(chat_id, "That reminder time is in the past. Choose a future time on the reminder's date.")
             return
+        job_id = int(selected_reminder.event_id.removeprefix("cron:"))
+        key = (chat_id, job_id)
+        if key in standalone_deliveries_in_flight:
+            await telegram.send_message(chat_id, "That reminder is being delivered or updated. Please try again shortly.")
+            return
         recent_reminder_lists.pop(chat_id, None)
         label = selected_reminder.reminder.message or "Reminder"
-        await cron.update_reminder(int(selected_reminder.event_id.removeprefix("cron:")), chat_id, due_at)
+        standalone_deliveries_in_flight.add(key)
+        try:
+            await cron.update_reminder(job_id, chat_id, due_at)
+            delivered_standalone_reminders.pop(key, None)
+            reminder_delivery_history.pop(key, None)
+        finally:
+            standalone_deliveries_in_flight.discard(key)
         await telegram.send_message(chat_id, f"✅ Reminder updated: {label}\n📅 {_format_time(due_at)}")
         return
     if recent_reminders and numbered_removal:
