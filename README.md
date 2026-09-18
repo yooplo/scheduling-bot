@@ -66,6 +66,7 @@ Reminder wording determines whether a notification is independent or event-linke
 - A lead time before a named event links the reminder to that event: `15 minutes before Dental` or `one day before IPPT`.
 - `reminders` lists both types chronologically. Independent reminders are labelled `🔔 Independent reminder`; attached reminders are labelled `🔗 Event reminder` and show the calendar event.
 - The displayed reminder list remains selectable for five minutes. `remove 2`, `delete 2`, or `cancel 2` removes that reminder rather than a calendar event; removing one attached reminder preserves the others on the same event.
+- After `reminders`, use `update 1 to 11.30am` to change an independent reminder's time on its existing date. Its message is preserved. Only future times are accepted; numbered time edits of event-linked reminders are not supported. A successful edit consumes the list; list again before another edit or after a failure, expiry, or restart. `cancel` dismisses the list, as does an unrelated message.
 - In `set a reminder at 11.55pm to book a court for 7 September`, the unqualified clock time controls delivery and `7 September` remains message text. Put an explicit date before `to`—for example `at 11.55pm on 7 September to ...`—to schedule delivery on that date.
 
 ## Current limitations
