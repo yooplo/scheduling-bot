@@ -150,3 +150,81 @@ async def test_status_view_includes_expired_failed_and_disabled_jobs(monkeypatch
     client=CronJobClient("key","https://bot.example.com","secret","Asia/Singapore")
     status={r.reminder.message:r.status for r in await client.list_reminders(987,include_history=True)}
     assert status == {"expired":"Expired (delivery unconfirmed)","failed":"Failed scheduler attempt (retry window open)","disabled":"Disabled","scheduled":"Scheduled","retrying":"Overdue / retrying"}
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize('owner,status', [(987, 200), (123, 200), (987, 500)])
+async def test_update_preserves_full_message_and_checks_ownership(monkeypatch, owner, status):
+    import json
+    import httpx
+    requests = []
+    message = 'A long reminder message ' * 20
+    def handle(request):
+        requests.append(request)
+        if request.method == 'GET':
+            return httpx.Response(200, json={'jobDetails': {'extendedData': {
+                'headers': {'Authorization': 'Bearer test-secret'},
+                'body': json.dumps({'job_id': 42, 'telegram_user_id': owner, 'message': message})}}})
+        job = json.loads(request.content)['job']
+        body = json.loads(job['extendedData']['body'])
+        assert body == {'job_id': 42, 'telegram_user_id': 987, 'message': message, 'due_at': '2099-09-18T11:30:00+08:00'}
+        assert job['schedule']['hours'] == [11]
+        assert job['schedule']['minutes'] == [30, 31, 32, 33, 34, 35]
+        assert job['enabled'] is True
+        assert job['extendedData']['headers'] == {'Authorization': 'Bearer test-secret'}
+        return httpx.Response(status, json={})
+    original = httpx.AsyncClient
+    monkeypatch.setattr('app.cron_client.httpx.AsyncClient', lambda **kwargs: original(transport=httpx.MockTransport(handle), **kwargs))
+    client = CronJobClient('key', 'https://bot.example.com', 'secret', 'Asia/Singapore')
+    due = datetime.fromisoformat('2099-09-18T11:30:00+08:00')
+    if owner != 987:
+        with pytest.raises(ValueError):
+            await client.update_reminder(42, 987, due)
+        assert len(requests) == 1
+    elif status == 500:
+        with pytest.raises(httpx.HTTPStatusError):
+            await client.update_reminder(42, 987, due)
+    else:
+        await client.update_reminder(42, 987, due)
+        assert [r.method for r in requests] == ['GET', 'PATCH']
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("change,expected", [
+    ({}, True),
+    ({"due_at": "2030-09-11T21:45:00+08:00"}, False),
+    ({"telegram_user_id": 999}, False),
+    ({"job_id": 99}, False),
+    ({"message": "changed"}, False),
+])
+async def test_callback_must_match_current_job(monkeypatch, change, expected):
+    import json
+    import httpx
+
+    original_body = {"job_id": 42, "telegram_user_id": 987, "message": "sleep",
+        "due_at": "2030-09-11T21:43:00+08:00"}
+    def handle(request):
+        assert request.method == "GET" and request.url.path == "/jobs/42"
+        return httpx.Response(200, json={"jobDetails": {
+            "url": "https://bot.example.com/scheduled/standalone-reminder",
+            "extendedData": {"body": json.dumps({**original_body, **change})}}})
+    original = httpx.AsyncClient
+    monkeypatch.setattr("app.cron_client.httpx.AsyncClient", lambda **kwargs: original(transport=httpx.MockTransport(handle), **kwargs))
+    client = CronJobClient("key", "https://bot.example.com", "secret", "Asia/Singapore")
+    assert await client.is_current_reminder(42, 987, "sleep", original_body["due_at"]) is expected
+    assert await client.is_current_reminder(42, 987, "sleep", None) is False
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("status", [404, 500])
+async def test_callback_lookup_missing_job_or_api_failure(monkeypatch, status):
+    import httpx
+
+    original = httpx.AsyncClient
+    monkeypatch.setattr("app.cron_client.httpx.AsyncClient", lambda **kwargs: original(
+        transport=httpx.MockTransport(lambda request: httpx.Response(status)), **kwargs))
+    client = CronJobClient("key", "https://bot.example.com", "secret", "Asia/Singapore")
+    if status == 404:
+        assert await client.is_current_reminder(42, 987, "sleep", None) is False
+    else:
+        with pytest.raises(httpx.HTTPStatusError):
+            await client.is_current_reminder(42, 987, "sleep", None)

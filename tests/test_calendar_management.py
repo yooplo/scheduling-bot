@@ -112,3 +112,71 @@ async def test_numbered_reminder_removal_uses_the_recent_reminder_list():
         assert telegram.messages[-1][1] == "🔕 Reminder removed: Second"
     finally:
         recent_reminder_lists.pop(chat_id, None)
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize('text,mode,expected', [
+    ('Update 1 to 11.30am', 'active', 'Reminder updated'),
+    ('reschedule 1 to 12am', 'active', 'Reminder updated'),
+    ('update 0 to 11am', 'active', 'Choose a reminder'),
+    ('update 2 to 11am', 'active', 'Choose a reminder'),
+    ('update 1 to 11.99am', 'active', "Use 'update"),
+    ('update 1 to tomorrow', 'active', "Use 'update"),
+    ('update 1 to 11am', 'linked', 'independent reminders only'),
+    ('update 1 to 11am', 'expired', "send 'reminders' again"),
+    ('update 1 to 11am', 'missing', "send 'reminders' again"),
+    ('update 1 to 11am', 'past', 'in the past'),
+    ('cancel', 'active', 'selection cancelled'),
+])
+async def test_numbered_reminder_edits_never_match_calendar_events(text, mode, expected):
+    import time
+    from unittest.mock import AsyncMock
+    from app.main import PendingReminderList
+
+    chat_id = 246811
+    due = datetime(2099, 9, 18, 23, 30, tzinfo=ZoneInfo('Asia/Singapore'))
+    reminder = ScheduledReminder(event_id='cron:10' if mode != 'linked' else 'event-id',
+        reminder=ReminderSpec(message='Lucky draw'), due_at=due if mode != 'past' else due.replace(year=2000),
+        standalone=mode != 'linked')
+    telegram = FakeTelegram()
+    cron = SimpleNamespace(update_reminder=AsyncMock())
+    settings = SimpleNamespace(timezone=ZoneInfo('Asia/Singapore'))
+    try:
+        if mode != 'missing':
+            recent_reminder_lists[chat_id] = PendingReminderList([reminder], time.monotonic() + (-1 if mode == 'expired' else 300))
+        await handle_message(chat_id, text, settings, telegram, object(), object(), cron)
+        assert expected in telegram.messages[-1][1]
+        if expected == 'Reminder updated':
+            target = due.replace(hour=11 if '11.30' in text else 0, minute=30 if '11.30' in text else 0)
+            cron.update_reminder.assert_awaited_once_with(10, chat_id, target)
+            assert 'Lucky draw' in telegram.messages[-1][1]
+            await handle_message(chat_id, text, settings, telegram, object(), object(), cron)
+            assert "send 'reminders' again" in telegram.messages[-1][1]
+            assert cron.update_reminder.await_count == 1
+        else:
+            cron.update_reminder.assert_not_awaited()
+    finally:
+        recent_reminder_lists.pop(chat_id, None)
+
+@pytest.mark.asyncio
+async def test_failed_numbered_update_consumes_selection():
+    import time
+    from unittest.mock import AsyncMock
+    from app.main import PendingReminderList
+
+    chat_id = 246812
+    reminder = ScheduledReminder(event_id='cron:10', reminder=ReminderSpec(message='Lucky draw'),
+        due_at=datetime(2099, 9, 18, 23, 30, tzinfo=ZoneInfo('Asia/Singapore')), standalone=True)
+    recent_reminder_lists[chat_id] = PendingReminderList([reminder], time.monotonic() + 300)
+    cron = SimpleNamespace(update_reminder=AsyncMock(side_effect=RuntimeError('scheduler unavailable')))
+    telegram = FakeTelegram()
+    settings = SimpleNamespace(timezone=ZoneInfo('Asia/Singapore'))
+    try:
+        with pytest.raises(RuntimeError):
+            await handle_message(chat_id, 'update 1 to 11.30am', settings, telegram, object(), object(), cron)
+        assert chat_id not in recent_reminder_lists
+        assert not telegram.messages
+        await handle_message(chat_id, 'update 1 to 11.30am', settings, telegram, object(), object(), cron)
+        assert "send 'reminders' again" in telegram.messages[-1][1]
+        assert cron.update_reminder.await_count == 1
+    finally:
+        recent_reminder_lists.pop(chat_id, None)

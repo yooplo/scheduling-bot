@@ -126,6 +126,41 @@ class CronJobClient:
                 continue
         return sorted(reminders, key=lambda item: item.due_at)
 
+    async def is_current_reminder(self, job_id: int, telegram_user_id: int, message: str, due_at: str | None) -> bool:
+        """Reject callbacks queued before a job was changed or deleted."""
+        async with httpx.AsyncClient(timeout=20) as client:
+            response = await client.get(f"{self.API_URL}/jobs/{job_id}", headers=self._headers)
+            if response.status_code == 404:
+                return False
+            response.raise_for_status()
+            job = response.json()["jobDetails"]
+            body = json.loads(job["extendedData"]["body"])
+            return (
+                job["url"] == self._callback_url
+                and body.get("job_id") == job_id
+                and body.get("telegram_user_id") == telegram_user_id
+                and body.get("message") == message
+                and body.get("due_at") == due_at
+            )
+
+    async def update_reminder(self, job_id: int, telegram_user_id: int, due_at: datetime) -> None:
+        due_at = due_at.astimezone(ZoneInfo(self._timezone))
+        async with httpx.AsyncClient(timeout=20) as client:
+            response = await client.get(f"{self.API_URL}/jobs/{job_id}", headers=self._headers)
+            response.raise_for_status()
+            job = response.json()["jobDetails"]
+            extended = job["extendedData"]
+            body = json.loads(extended["body"])
+            if body.get("telegram_user_id") != telegram_user_id or body.get("job_id") != job_id:
+                raise ValueError("Reminder ownership mismatch")
+            message = body["message"]
+            updated = self._job_payload(telegram_user_id, message, due_at)
+            response = await client.patch(f"{self.API_URL}/jobs/{job_id}", headers=self._headers, json={"job": {
+                "schedule": updated["schedule"], "title": updated["title"], "enabled": True,
+                "extendedData": {**extended, "body": json.dumps({**body, "due_at": due_at.isoformat()})},
+            }})
+            response.raise_for_status()
+
     async def delete_reminder(self, job_id: int) -> None:
         async with httpx.AsyncClient(timeout=20) as client:
             response = await client.delete(f"{self.API_URL}/jobs/{job_id}", headers=self._headers)

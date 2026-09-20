@@ -443,6 +443,15 @@ async def scheduled_standalone_reminder(request: Request, authorization: str | N
         return Response(status_code=204)
     standalone_deliveries_in_flight.add(key)
     try:
+        if not cron:
+            raise HTTPException(status_code=503, detail="Independent reminders are not configured")
+        if not await cron.is_current_reminder(job_id, telegram_user_id, message, payload.get("due_at")):
+            return Response(status_code=204)
+        observed_delivery = reminder_delivery_history.get(key)
+        if "due_at" in payload and observed_delivery and observed_delivery[1].due_at != due_at:
+            # The remote update may have succeeded even if its response was lost.
+            delivered_standalone_reminders.pop(key, None)
+            reminder_delivery_history.pop(key, None)
         if key not in delivered_standalone_reminders:
             for history_key, (expiry, _) in list(reminder_delivery_history.items()):
                 if expiry <= time.monotonic():
@@ -514,6 +523,50 @@ async def handle_message(chat_id: int, text: str, settings: Settings, telegram: 
         recent_reminder_lists.pop(chat_id, None)
         recent_reminders = None
     numbered_removal = re.fullmatch(r"(?:remove|delete|cancel)\s+([1-9]\d*)", lowered)
+    if recent_reminders and (lowered == "cancel" or command == "cancel"):
+        recent_reminder_lists.pop(chat_id, None)
+        await telegram.send_message(chat_id, "Reminder selection cancelled.")
+        return
+    numbered_edit = re.fullmatch(r"(?:update|move|change|edit|reschedule)\s+(\d+)\b(.*)", lowered)
+    if numbered_edit:
+        if not recent_reminders:
+            await telegram.send_message(chat_id, "Please send 'reminders' again, then update a number from that list.")
+            return
+        index = int(numbered_edit.group(1)) - 1
+        if not 0 <= index < len(recent_reminders.reminders):
+            await telegram.send_message(chat_id, f"Choose a reminder number from 1 to {len(recent_reminders.reminders)}.")
+            return
+        selected_reminder = recent_reminders.reminders[index]
+        clock = re.fullmatch(r"\s+to\s+(1[0-2]|[1-9])(?:[:.](\d{2}))?\s*(am|pm)", numbered_edit.group(2))
+        if not clock or int(clock.group(2) or 0) > 59:
+            await telegram.send_message(chat_id, "Use 'update 1 to 11.30am' to change the time on the reminder's existing date.")
+            return
+        if not selected_reminder.event_id.startswith("cron:") or not cron:
+            await telegram.send_message(chat_id, "Numbered time changes support independent reminders only. For an event reminder, specify the event and lead time, such as 'set a reminder for Dental 1 hour before'.")
+            return
+        due_at = selected_reminder.due_at.astimezone(settings.timezone).replace(
+            hour=int(clock.group(1)) % 12 + (12 if clock.group(3) == "pm" else 0),
+            minute=int(clock.group(2) or 0), second=0, microsecond=0,
+        )
+        if due_at <= datetime.now(settings.timezone):
+            await telegram.send_message(chat_id, "That reminder time is in the past. Choose a future time on the reminder's date.")
+            return
+        job_id = int(selected_reminder.event_id.removeprefix("cron:"))
+        key = (chat_id, job_id)
+        if key in standalone_deliveries_in_flight:
+            await telegram.send_message(chat_id, "That reminder is being delivered or updated. Please try again shortly.")
+            return
+        recent_reminder_lists.pop(chat_id, None)
+        label = selected_reminder.reminder.message or "Reminder"
+        standalone_deliveries_in_flight.add(key)
+        try:
+            await cron.update_reminder(job_id, chat_id, due_at)
+            delivered_standalone_reminders.pop(key, None)
+            reminder_delivery_history.pop(key, None)
+        finally:
+            standalone_deliveries_in_flight.discard(key)
+        await telegram.send_message(chat_id, f"✅ Reminder updated: {label}\n📅 {_format_time(due_at)}")
+        return
     if recent_reminders and numbered_removal:
         index = int(numbered_removal.group(1)) - 1
         if index >= len(recent_reminders.reminders):
@@ -1235,6 +1288,7 @@ HELP_TOPICS = {
         "remind me 15 minutes before Dental\n"
         "add another reminder for Dental 1 hour before\n"
         "/reminders — list upcoming reminders\n"
+        "update 1 to 11.30am — change an independent reminder's time after listing\n"
         "/reminder_status — check delivery status\n"
         "remove 2 — remove item 2 after listing reminders\n\n"
         "Independent reminders send a Telegram message without creating an event. "
