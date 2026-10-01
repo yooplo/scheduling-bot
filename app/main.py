@@ -1169,6 +1169,17 @@ def _date_from_text(text: str, settings: Settings):
 
 def _apply_weekday_from_text(event: ParsedEvent, text: str, now: datetime) -> None:
     """Resolve a single relative weekday locally before checking conflicts."""
+    target = _relative_weekday_date(text, now)
+    if target is None:
+        return
+    local_start = event.start.astimezone(now.tzinfo)
+    local_end = event.end.astimezone(now.tzinfo)
+    shift = target - local_start.date()
+    event.start = local_start + shift
+    event.end = local_end + shift
+
+
+def _relative_weekday_date(text: str, now: datetime):
     weekdays = ("monday", "tuesday", "wednesday", "thursday", "friday", "saturday", "sunday")
     matches = list(re.finditer(
         r"\b(?:(next|this|on|every)\s+)?(monday|tuesday|wednesday|thursday|friday|saturday|sunday)\b",
@@ -1187,12 +1198,7 @@ def _apply_weekday_from_text(event: ParsedEvent, text: str, now: datetime) -> No
     offset = (weekdays.index(match.group(2).lower()) - now.weekday()) % 7
     if offset == 0 and (match.group(1) or "").lower() == "next":
         offset = 7
-    target = now.date() + timedelta(days=offset)
-    local_start = event.start.astimezone(now.tzinfo)
-    local_end = event.end.astimezone(now.tzinfo)
-    shift = target - local_start.date()
-    event.start = local_start + shift
-    event.end = local_end + shift
+    return now.date() + timedelta(days=offset)
 
 
 def _upcoming_weekday_from_text(text: str, settings: Settings):
@@ -1518,14 +1524,25 @@ def _apply_standalone_clock_from_text(reminder, text: str, now: datetime) -> Non
     if not command:
         return
     schedule = command.group("schedule")
+    if not schedule.strip():
+        # Message-first wording: only a simple trailing weekday/clock is a schedule.
+        suffix = re.search(
+            r"\b(?:(?:on|this|next)\s+)?(?:monday|tuesday|wednesday|thursday|friday|saturday|sunday)"
+            r"\s+(?:at\s+)?\d{1,2}(?:[:.]\d{2})?\s*(?:am|pm)\s*[.!]?\s*$",
+            text[command.end():], flags=re.IGNORECASE,
+        )
+        if not suffix or _relative_weekday_date(text[command.end():], now) is None:
+            return
+        schedule = suffix.group()
+    weekday = _relative_weekday_date(schedule, now)
     clock = re.search(r"\b(?:at\s+)?(\d{1,2})(?:[:.](\d{2}))?\s*(am|pm)\b", schedule, flags=re.IGNORECASE)
-    if not clock or re.search(
+    if not clock or (weekday is None and re.search(
         r"\b(?:on|"
         r"monday|tuesday|wednesday|thursday|friday|saturday|sunday|"
         r"jan(?:uary)?|feb(?:ruary)?|mar(?:ch)?|apr(?:il)?|may|jun(?:e)?|"
         r"jul(?:y)?|aug(?:ust)?|sep(?:t(?:ember)?)?|oct(?:ober)?|nov(?:ember)?|dec(?:ember)?)\b",
         schedule, flags=re.IGNORECASE,
-    ):
+    )):
         return
     hour = int(clock.group(1))
     minute = int(clock.group(2) or 0)
@@ -1536,6 +1553,9 @@ def _apply_standalone_clock_from_text(reminder, text: str, now: datetime) -> Non
     elif clock.group(3).lower() == "am" and hour == 12:
         hour = 0
     due_at = now.replace(hour=hour, minute=minute, second=0, microsecond=0)
+    if weekday is not None:
+        reminder.due_at = due_at.replace(year=weekday.year, month=weekday.month, day=weekday.day)
+        return
     relative_day = re.search(r"\b(today|tonight|tomorrow|tmr)\b", schedule, flags=re.IGNORECASE)
     if relative_day:
         if relative_day.group(1).lower() in {"tomorrow", "tmr"}:
