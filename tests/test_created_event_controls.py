@@ -464,3 +464,45 @@ async def test_unusable_default_calendar_prevents_creation(flow, unavailable):
     await main._create_event(123, event, telegram, calendar)
     calendar.create_event.assert_not_called()
     assert 'Calendar:' not in telegram.send_message.call_args.args[1]
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize('reply,start_hour,end_hour', [('Tues 9-10pm', 21, 22), ('Tues', 20, 22)])
+async def test_saved_monday_edit_resolves_tues_despite_wrong_parser_date(flow, monkeypatch, reply, start_hour, end_hour):
+    from datetime import datetime
+    class Clock(datetime):
+        @classmethod
+        def now(cls, tz=None):
+            return cls(2026, 10, 9, 1, 28, tzinfo=ZoneInfo('Asia/Singapore')).astimezone(tz)
+    monkeypatch.setattr(main, 'datetime', Clock)
+    _, click, settings, telegram, calendar, parser = flow
+    event = ParsedEvent(title='Drills', start='2026-10-12T20:00:00+08:00',
+                        end='2026-10-12T22:00:00+08:00', confidence='high')
+    await main._create_event(123, event, telegram, calendar)
+    saved = main.pending_actions[123].events[0]
+    button = telegram.send_message.call_args.args[2]['inline_keyboard'][0][0]['callback_data']
+    await click(button)
+    parser.parse_edit.side_effect = None
+    parser.parse_edit.return_value = ParsedEdit(title='Drills', start='2026-10-17T20:00:00+08:00',
+                                              end='2026-10-17T22:00:00+08:00', confidence='high')
+    await main.handle_message(123, reply, settings, telegram, calendar, parser)
+    existing, edited = calendar.update_event.call_args.args
+    assert existing == saved
+    assert edited.start.isoformat() == f'2026-10-13T{start_hour}:00:00+08:00'
+    assert edited.end.isoformat() == f'2026-10-13T{end_hour}:00:00+08:00'
+    calendar._list_events_between.assert_called_once_with(edited.start, edited.end)
+    calendar.create_event.assert_called_once()
+
+
+@pytest.mark.asyncio
+async def test_edited_telegram_message_does_not_submit_saved_event_change(flow):
+    create, click, _, telegram, calendar, parser = flow
+    buttons = await create()
+    await click(buttons['Change date/time'])
+    pending = main.pending_actions[123]
+    request = Mock()
+    request.json = AsyncMock(return_value={'update_id': 12345, 'edited_message': {
+        'message_id':1, 'chat':{'id':123, 'type':'private'}, 'from':{'id':123}, 'text':'Tues 9-10pm'}})
+    await main.webhook(request, 'secret')
+    assert main.pending_actions[123] is pending
+    parser.parse_edit.assert_not_called()
+    calendar.update_event.assert_not_called()
