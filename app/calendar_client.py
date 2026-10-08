@@ -20,6 +20,14 @@ REMINDER_CALENDAR_NAME = "Telegram Reminders"
 REMINDER_CALENDAR_MARKER = "SchedulingBot internal standalone reminder storage"
 
 
+class CalendarMoveError(RuntimeError):
+    """The event moved, but its private metadata could not be restored."""
+
+    def __init__(self, event: CalendarEvent):
+        super().__init__("Event moved but reminder metadata restoration failed")
+        self.event = event
+
+
 def _request_builder(credentials: Credentials):
     """Give each Google API request its own non-shared HTTP transport."""
     def build_request(_http, *args, **kwargs):
@@ -110,15 +118,41 @@ class CalendarClient:
         return None
 
     def resolve_calendar(self, name: str | None) -> CalendarInfo | None:
-        if not name:
-            return None
-        normalized = re.sub(r"\s+calendar\s*$", "", name.strip(), flags=re.IGNORECASE).casefold()
         calendars = self.list_calendars()
+        if not name:
+            return next((calendar for calendar in calendars if calendar.calendar_id == self._calendar_id
+                         or (self._calendar_id == "primary" and calendar.primary)), None)
+        normalized = re.sub(r"\s+calendar\s*$", "", name.strip(), flags=re.IGNORECASE).casefold()
         exact = [calendar for calendar in calendars if calendar.name.casefold() == normalized]
         if len(exact) == 1:
             return exact[0]
         partial = [calendar for calendar in calendars if normalized in calendar.name.casefold()]
         return partial[0] if len(partial) == 1 else None
+
+    def move_event(self, event: CalendarEvent, destination: CalendarInfo) -> CalendarEvent:
+        source_id = event.calendar_id or self._calendar_id
+        calendars = self.list_calendars()
+        for calendar_id in (source_id, destination.calendar_id):
+            if not any(c.calendar_id == calendar_id and c.access_role in {"owner", "writer"} for c in calendars):
+                raise PermissionError("Both calendars must be writable")
+        if source_id == destination.calendar_id:
+            raise ValueError("The event is already in this calendar")
+        events = self._service.events()
+        event_id = event.recurring_event_id or event.event_id
+        source = events.get(calendarId=source_id, eventId=event_id).execute()
+        private = source.get("extendedProperties", {}).get("private", {})
+        item = events.move(calendarId=source_id, eventId=event_id, destination=destination.calendar_id).execute()
+        moved = _to_event(item, self._timezone, destination.calendar_id, destination.name)
+        if private and any(item.get("extendedProperties", {}).get("private", {}).get(k) != v for k, v in private.items()):
+            try:
+                item = events.patch(calendarId=destination.calendar_id, eventId=item["id"],
+                                    body={"extendedProperties": {"private": private}}).execute()
+                moved = _to_event(item, self._timezone, destination.calendar_id, destination.name)
+            except Exception as exc:
+                raise CalendarMoveError(moved) from exc
+        if event.recurring_event_id:
+            moved = moved.model_copy(update={"recurring_event_id": moved.event_id})
+        return moved
 
     def list_events(self, days_ahead: int = 7) -> list[CalendarEvent]:
         now = datetime.now(timezone.utc)

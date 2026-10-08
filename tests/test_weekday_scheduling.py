@@ -5,7 +5,7 @@ from zoneinfo import ZoneInfo
 import pytest
 
 import app.main as main
-from app.models import CalendarEvent, ParsedEvent
+from app.models import CalendarInfo, CalendarEvent, ParsedEvent
 
 
 @pytest.mark.asyncio
@@ -36,7 +36,7 @@ async def test_monday_request_checks_monday_despite_wrong_parser_date(monkeypatc
                                   end=start + timedelta(days=1), all_day=True)]
 
         def resolve_calendar(self, name):
-            return None
+            return CalendarInfo(calendar_id="default", name="Personal", access_role="owner")
 
         def create_event(self, event, calendar_id):
             created.append(event)
@@ -110,7 +110,7 @@ async def test_drills_compact_range_checks_monday_before_creation(monkeypatch, c
             return [CalendarEvent(event_id="busy", title="Busy", start=start, end=start + timedelta(hours=1))]
 
         def resolve_calendar(self, name):
-            return None
+            return CalendarInfo(calendar_id="default", name="Personal", access_role="owner")
 
         def create_event(self, event, calendar_id):
             created.append(event)

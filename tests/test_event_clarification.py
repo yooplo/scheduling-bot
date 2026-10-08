@@ -16,7 +16,7 @@ def flow():
     settings = SimpleNamespace(timezone=ZoneInfo("Asia/Singapore"), user_timezone="Asia/Singapore")
     telegram, calendar, parser = AsyncMock(), Mock(), Mock()
     calendar._list_events_between.return_value = []
-    calendar.resolve_calendar.return_value = None
+    calendar.resolve_calendar.return_value = CalendarInfo(calendar_id="default", name="Personal", access_role="owner")
     calendar.create_event.side_effect = lambda event, _: CalendarEvent(event_id="new", **event.model_dump(exclude={"action"}))
 
     async def send(text, chat_id=123):

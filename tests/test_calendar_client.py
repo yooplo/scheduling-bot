@@ -240,3 +240,84 @@ def test_remove_reminder_preserves_other_reminders():
     private = calls["body"]["extendedProperties"]["private"]
     assert '"reminder_id":"keep"' in private["telegram_reminders"]
     assert '"reminder_id":"remove"' not in private["telegram_reminders"]
+
+@pytest.mark.parametrize('default_id', ['primary', 'account@example.com'])
+def test_default_calendar_resolves_to_real_name_and_id(default_id):
+    from unittest.mock import Mock
+    client = CalendarClient.__new__(CalendarClient)
+    client._calendar_id = default_id
+    primary = CalendarInfo(calendar_id='account@example.com', name='Personal', primary=True, access_role='owner')
+    client.list_calendars = Mock(return_value=[primary])
+    assert client.resolve_calendar(None) == primary
+
+
+@pytest.mark.parametrize('all_day,series,metadata_preserved', [(False, False, False), (True, False, True), (False, True, False)])
+def test_native_move_preserves_reminder_state_and_uses_series_master(all_day, series, metadata_preserved):
+    from unittest.mock import Mock
+    client = CalendarClient.__new__(CalendarClient)
+    client._calendar_id, client._timezone = 'work', 'Asia/Singapore'
+    destination = CalendarInfo(calendar_id='home', name='Home', access_role='writer')
+    client.list_calendars = Mock(return_value=[CalendarInfo(calendar_id='work', name='Work', access_role='owner'), destination])
+    reminders = _serialize_reminders([ReminderSpec(minutes_before=15, message='Bring paddle', sent=True)])
+    private = {'telegram_reminders': reminders, 'other': 'keep'}
+    item = {'id':'moved', 'summary':'Drills', 'location':'TSA@JK',
+            'start': {'date':'2030-10-12'} if all_day else {'dateTime':'2030-10-12T20:00:00+08:00'},
+            'end': {'date':'2030-10-13'} if all_day else {'dateTime':'2030-10-12T22:00:00+08:00'}}
+    source = {**item, 'extendedProperties': {'private': private}}
+    events = Mock()
+    events.get.return_value.execute.return_value = source
+    events.move.return_value.execute.return_value = source if metadata_preserved else item
+    events.patch.return_value.execute.return_value = source
+    client._service = Mock()
+    client._service.events.return_value = events
+    event = _to_event(source, client._timezone, 'work')
+    if series:
+        event = event.model_copy(update={'event_id':'instance', 'recurring_event_id':'master'})
+    moved = client.move_event(event, destination)
+    events.move.assert_called_once_with(calendarId='work', eventId='master' if series else 'moved', destination='home')
+    if metadata_preserved:
+        events.patch.assert_not_called()
+    else:
+        events.patch.assert_called_once_with(calendarId='home', eventId='moved', body={'extendedProperties':{'private':private}})
+    assert moved.calendar_id == 'home' and moved.calendar_name == 'Home'
+    assert moved.start == event.start and moved.end == event.end and moved.all_day == all_day
+    assert moved.location == event.location and moved.reminders[0].sent
+    assert moved.recurring_event_id == ('moved' if series else None)
+    events.insert.assert_not_called()
+    events.delete.assert_not_called()
+
+
+@pytest.mark.parametrize('source_role,destination_role', [('reader', 'writer'), ('owner', 'reader'), ('owner', None)])
+def test_move_rechecks_both_calendar_permissions(source_role, destination_role):
+    from unittest.mock import Mock
+    client = CalendarClient.__new__(CalendarClient)
+    client._calendar_id = 'work'
+    destination = CalendarInfo(calendar_id='home', name='Home', access_role='writer')
+    client.list_calendars = Mock(return_value=[CalendarInfo(calendar_id='work', name='Work', access_role=source_role),
+                                              destination.model_copy(update={'access_role': destination_role})])
+    client._service = Mock()
+    with pytest.raises(PermissionError):
+        client.move_event(CalendarEvent(event_id='event', title='Drills', start='2030-10-12T20:00:00+08:00', calendar_id='work'), destination)
+    client._service.events.assert_not_called()
+
+
+def test_move_reports_known_partial_success_when_metadata_restore_fails():
+    from unittest.mock import Mock
+    from app.calendar_client import CalendarMoveError
+    client = CalendarClient.__new__(CalendarClient)
+    client._calendar_id, client._timezone = 'work', 'Asia/Singapore'
+    destination = CalendarInfo(calendar_id='home', name='Home', access_role='writer')
+    client.list_calendars = Mock(return_value=[CalendarInfo(calendar_id='work', name='Work', access_role='owner'), destination])
+    item = {'id':'moved', 'summary':'Drills', 'start':{'dateTime':'2030-10-12T20:00:00+08:00'},
+            'end':{'dateTime':'2030-10-12T22:00:00+08:00'}}
+    events = Mock()
+    events.get.return_value.execute.return_value = {**item, 'extendedProperties':{'private':{'telegram_reminders':'[]'}}}
+    events.move.return_value.execute.return_value = item
+    events.patch.return_value.execute.side_effect = RuntimeError('unavailable')
+    client._service = Mock()
+    client._service.events.return_value = events
+    with pytest.raises(CalendarMoveError) as error:
+        client.move_event(_to_event(item, client._timezone, 'work'), destination)
+    assert error.value.event.calendar_id == 'home'
+    events.move.assert_called_once()
+    events.delete.assert_not_called()

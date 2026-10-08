@@ -38,7 +38,7 @@ def flow(monkeypatch):
     async def create(recurrence=False):
         await main._create_event(123, event.model_copy(update={"recurrence": "RRULE:FREQ=WEEKLY;BYDAY=MO" if recurrence else None}), telegram, calendar)
         return {button["text"]: button["callback_data"]
-                for button in telegram.send_message.call_args.args[2]["inline_keyboard"][0]}
+                for row in telegram.send_message.call_args.args[2]["inline_keyboard"] for button in row}
 
     async def click(data):
         await main.handle_created_callback(123, "cb", data, telegram, calendar)
@@ -51,7 +51,7 @@ def flow(monkeypatch):
 async def test_created_buttons_delete_exact_calendar_event_once(flow):
     create, click, _, telegram, calendar, parser = flow
     buttons = await create()
-    assert set(buttons) == {"Change time", "Change date", "Delete this event"}
+    assert set(buttons) == {"Change time", "Change date", "Change calendar", "Delete this event"}
     assert all(len(data.encode()) <= 64 for data in buttons.values())
     saved = main.pending_actions[123].events[0]
     await asyncio.gather(click(buttons["Delete this event"]), click(buttons["Delete this event"]))
@@ -150,7 +150,7 @@ async def test_stale_created_buttons_cannot_delete_newer_event(flow, action):
 
 
 @pytest.mark.asyncio
-@pytest.mark.parametrize("control", ["Delete this event", "Change date"])
+@pytest.mark.parametrize("control", ["Delete this event", "Change date", "Change calendar"])
 @pytest.mark.parametrize("chat_type,chat_id,sender", [("private", 123, 456), ("private", 789, 789), ("group", -100, 123)])
 async def test_created_callbacks_require_owners_private_chat(flow, chat_type, chat_id, sender, control):
     create, _, _, telegram, calendar, _ = flow
@@ -192,7 +192,7 @@ async def test_selection_callback_cannot_reinterpret_created_token(flow):
 async def test_recurring_shortcuts_clearly_target_whole_series(flow, action):
     create, click, settings, telegram, calendar, parser = flow
     buttons = await create(recurrence=True)
-    assert set(buttons) == {"Change series time", "Change series date", "Delete series"}
+    assert set(buttons) == {"Change series time", "Change series date", "Change series calendar", "Delete series"}
     assert "whole series" in telegram.send_message.call_args.args[1]
     if action == "delete":
         await click(buttons["Delete series"])
@@ -282,7 +282,7 @@ async def test_change_date_preserves_saved_clocks_duration_and_all_day_status(fl
     end = "2030-10-13T00:00:00+08:00" if all_day else "2030-10-13T01:00:00+08:00" if overnight else "2030-10-12T22:00:00+08:00"
     await main._create_event(123, ParsedEvent(title="Drills", start=start, end=end, all_day=all_day, confidence="high"), telegram, calendar)
     saved = main.pending_actions[123].events[0]
-    buttons = {button["text"]: button["callback_data"] for button in telegram.send_message.call_args.args[2]["inline_keyboard"][0]}
+    buttons = {button["text"]: button["callback_data"] for row in telegram.send_message.call_args.args[2]["inline_keyboard"] for button in row}
     await click(buttons["Change date"])
     assert "What date should I use" in telegram.send_message.call_args.args[1]
     assert "keep the current time and duration" in telegram.send_message.call_args.args[1]
@@ -328,3 +328,139 @@ async def test_change_date_conflict_waits_for_confirmation_without_duplicate_eve
     await main.handle_conflict_callback(123, "cb", f"conflict:{pending.token}:add", settings, telegram, calendar)
     calendar.update_event.assert_called_once()
     calendar.create_event.assert_called_once()
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize('recurring', [False, True])
+async def test_change_calendar_moves_once_and_renews_correct_target(flow, recurring):
+    create, click, _, telegram, calendar, _ = flow
+    buttons = await create(recurring)
+    saved = main.pending_actions[123].events[0]
+    assert 'Calendar: Work' in telegram.send_message.call_args.args[1]
+    destination = CalendarInfo(calendar_id='personal', name='Personal', access_role='owner')
+    calendar.list_calendars.return_value = [calendar.resolve_calendar.return_value, destination,
+        CalendarInfo(calendar_id='read', name='Read only', access_role='reader')]
+    calendar.move_event.return_value = saved.model_copy(update={'calendar_id':'personal', 'calendar_name':'Personal'})
+    await click(buttons['Change series calendar' if recurring else 'Change calendar'])
+    rows = telegram.send_message.call_args.args[2]['inline_keyboard']
+    assert [row[0]['text'] for row in rows] == ['Personal', 'Cancel']
+    selection = rows[0][0]['callback_data']
+    assert len(selection.encode()) <= 64
+    await asyncio.gather(click(selection), click(selection))
+    calendar.move_event.assert_called_once_with(saved, destination)
+    calendar.create_event.assert_called_once()
+    assert 'Calendar: Personal' in telegram.send_message.call_args.args[1]
+    assert main.pending_actions[123].events[0].calendar_id == 'personal'
+    delete = telegram.send_message.call_args.args[2]['inline_keyboard'][-1][-1]['callback_data']
+    await click(delete)
+    method = calendar.delete_series if recurring else calendar.delete_event
+    assert method.call_args.args[0].calendar_id == 'personal'
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize('ending', ['cancel', 'message', 'expiry', 'replacement', 'restart', 'failure', 'partial', 'invalid'])
+async def test_calendar_picker_lifecycle_and_failures(flow, ending):
+    from app.calendar_client import CalendarMoveError
+    create, click, settings, telegram, calendar, parser = flow
+    buttons = await create()
+    saved = main.pending_actions[123].events[0]
+    calendar.list_calendars.return_value = [CalendarInfo(calendar_id='home', name='Home', access_role='owner')]
+    await click(buttons['Change calendar'])
+    rows = telegram.send_message.call_args.args[2]['inline_keyboard']
+    selection = rows[0][0]['callback_data']
+    if ending == 'cancel':
+        await click(rows[-1][0]['callback_data'])
+    elif ending == 'message':
+        await main.handle_message(123, '/cancel', settings, telegram, calendar, parser)
+    elif ending == 'expiry':
+        main.pending_actions[123].expires_at = 0
+    elif ending == 'replacement':
+        await create()
+    elif ending == 'restart':
+        main.pending_actions.clear()
+    elif ending == 'invalid':
+        await click(selection.rsplit(':', 1)[0] + ':99')
+    else:
+        calendar.move_event.side_effect = (CalendarMoveError(saved.model_copy(update={'calendar_name':'Home'}))
+                                           if ending == 'partial' else RuntimeError('unavailable'))
+    await click(selection)
+    await click(selection)
+    if ending in {'failure', 'partial'}:
+        calendar.move_event.assert_called_once()
+        message = telegram.send_message.call_args.args[1]
+        assert 'inspect' in message
+        if ending == 'partial':
+            assert 'moved to Home' in message and 'reminder preservation failed' in message
+    else:
+        calendar.move_event.assert_not_called()
+
+
+@pytest.mark.asyncio
+async def test_no_writable_calendar_choices_leave_event_unchanged(flow):
+    create, click, _, telegram, calendar, _ = flow
+    buttons = await create()
+    calendar.list_calendars.return_value = [calendar.resolve_calendar.return_value]
+    await click(buttons['Change calendar'])
+    assert 'no other writable calendars' in telegram.send_message.call_args.args[1]
+    calendar.move_event.assert_not_called()
+    assert 123 not in main.pending_actions
+
+@pytest.mark.asyncio
+async def test_default_add_displays_resolved_calendar(flow):
+    _, _, _, telegram, calendar, _ = flow
+    event = ParsedEvent(title='Drills', start='2030-10-12T20:00:00+08:00', end='2030-10-12T22:00:00+08:00', confidence='high')
+    await main._create_event(123, event, telegram, calendar)
+    calendar.resolve_calendar.assert_called_once_with(None)
+    assert 'Calendar: Work' in telegram.send_message.call_args.args[1]
+    assert calendar.create_event.call_args.args[1] == 'work'
+
+
+@pytest.mark.asyncio
+async def test_calendar_listing_failure_consumes_picker(flow):
+    create, click, _, telegram, calendar, _ = flow
+    buttons = await create()
+    calendar.list_calendars.side_effect = RuntimeError('unavailable')
+    await click(buttons['Change calendar'])
+    assert 123 not in main.pending_actions
+    assert 'event is unchanged' in telegram.send_message.call_args.args[1]
+    calendar.move_event.assert_not_called()
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize('stage', ['list', 'move'])
+async def test_calendar_operation_completion_does_not_replace_newer_request(flow, monkeypatch, stage):
+    create, click, _, telegram, calendar, _ = flow
+    buttons = await create()
+    destination = CalendarInfo(calendar_id='home', name='Home', access_role='owner')
+    calendar.list_calendars.return_value = [destination]
+    original = main.asyncio.to_thread
+    started, finish = asyncio.Event(), asyncio.Event()
+    calendar.move_event.side_effect = lambda event, dest: event.model_copy(update={'calendar_id':dest.calendar_id, 'calendar_name':dest.name})
+    async def delayed(function, *args):
+        if function == (calendar.list_calendars if stage == 'list' else calendar.move_event):
+            started.set()
+            await finish.wait()
+        return await original(function, *args)
+    monkeypatch.setattr(main.asyncio, 'to_thread', delayed)
+    if stage == 'move':
+        await click(buttons['Change calendar'])
+        data = telegram.send_message.call_args.args[2]['inline_keyboard'][0][0]['callback_data']
+    else:
+        data = buttons['Change calendar']
+    task = asyncio.create_task(click(data))
+    await started.wait()
+    await create()
+    newer = main.pending_actions[123]
+    finish.set()
+    await task
+    assert main.pending_actions[123] is newer
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize('unavailable', ['missing', 'read only'])
+async def test_unusable_default_calendar_prevents_creation(flow, unavailable):
+    _, _, _, telegram, calendar, _ = flow
+    calendar.resolve_calendar.return_value = (None if unavailable == 'missing' else
+        CalendarInfo(calendar_id='work', name='Work', access_role='reader'))
+    event = ParsedEvent(title='Drills', start='2030-10-12T20:00:00+08:00', end='2030-10-12T22:00:00+08:00', confidence='high')
+    await main._create_event(123, event, telegram, calendar)
+    calendar.create_event.assert_not_called()
+    assert 'Calendar:' not in telegram.send_message.call_args.args[1]
