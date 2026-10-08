@@ -17,7 +17,7 @@ def flow():
     event = ParsedEvent(title="Dentist", start="2030-09-13T14:00:00+08:00", end="2030-09-13T15:00:00+08:00",
                         location="Clinic", calendar_name="Work", reminder_minutes=15, confidence="high")
     parser.parse_event.return_value = event
-    calendar.list_events.return_value = [CalendarEvent(event_id="busy", title="Meeting", start=event.start, end=event.end)]
+    calendar._list_events_between.return_value = [CalendarEvent(event_id="busy", title="Meeting", start=event.start, end=event.end)]
     calendar.resolve_calendar.return_value = CalendarInfo(calendar_id="work", name="Work", access_role="writer")
     calendar.create_event.side_effect = lambda event, _: CalendarEvent(event_id="new", **event.model_dump(exclude={"action"}))
 
@@ -64,7 +64,7 @@ async def test_change_time_preserves_context_and_checks_conflicts_again(flow):
     text = parser.parse_event.call_args.args[0]
     assert "Clinic in Work calendar" in text and "duration of 60 minutes" in text
     assert "User follow-up: 4pm" in text
-    assert calendar.list_events.call_count == 2
+    assert calendar._list_events_between.call_count == 2
     created = calendar.create_event.call_args.args[0]
     assert created.start.hour == 16 and created.end.hour == 17 and not created.all_day
     assert created.location == "Clinic" and created.reminders[0].minutes_before == 15

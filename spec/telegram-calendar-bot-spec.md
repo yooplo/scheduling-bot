@@ -187,7 +187,7 @@ Reminders, Availability, and Calendars buttons. Each category shows concise,
 plain-text examples that can be copied into a new message, plus a Back button.
 The menu also mentions `/now`. Examples cover all-day and recurring events,
 event selection and conflict choices, independent/event reminders and status,
-free-time queries, and calendar management. `/start` advertises `/help`.
+free-time queries, and calendar management. Events help includes `Add Drills at TSA@JK on Monday 8-10pm` and `move Drills to Tue 20:00-22:00`, explains weekday abbreviations, 24-hour and explicit overnight ranges, date/weekday clarification and conflict checks months ahead. It states that recurring events check only the first occurrence. Weekdays use the next matching day, including today; `next Monday` requested on Monday means one week later. `/start` advertises `/help`.
 Help does not call Groq or perform calendar/reminder operations.
 
 In the configured group, `/help` shows only read-only schedule examples and
@@ -264,19 +264,23 @@ The implemented router uses keyword/phrase checks and command parsers before inv
 
 ### 8.1 Add event
 1. Receive message → deterministic intent checks do not match another flow → treat as add
-2. Normalize routing controls (`add anyway`) and all-day synonyms. Concise `<weekday/date> whole day with <title>` requests are parsed locally; otherwise call `parser.parse_event(message, now, timezone)`
-3. If scheduling details are missing, retain the request and ask one question:
+2. Normalize routing controls (`add anyway`) and all-day synonyms. Check simple date/weekday disagreements and invalid or ambiguous clock ranges before parsing; retain the request and ask for clarification without writing. Concise `<weekday/date> whole day with <title>` requests are parsed locally; otherwise call `parser.parse_event(message, now, timezone)`
+3. Apply locally recognized scheduling details to the parsed draft before deciding whether scheduling details are missing. If details are still missing, retain the request and ask one question:
    "Which date?", "What time?", or "How long?", in that order. All-day events
    require only a date. Other low-confidence results receive a clarification
    prompt and retain the request as well. Do not create an incomplete event.
 4. For explicit all-day wording, normalize to local-midnight date boundaries and set `all_day`; otherwise retain timed values
-5. After validating timezone-aware start/end values, resolve a single unqualified weekday locally in the user's timezone before checking conflicts. Bare weekdays and `this`, `on`, or `every` use the next matching day, including today; `next` uses seven days later when today already matches. Shift both start and end by the same number of local calendar days, preserving clock times and overnight spans.
-6. Leave qualified dates and ranges to the parser: multiple weekday mentions, numeric dates, ordinal dates, month names, or qualifiers such as `last`, `following`, `after`, `before`, `week(s)`, `month(s)`, `today`, and `tomorrow` skip this correction.
-7. Check the corrected interval against upcoming events in the 30-day window. On overlap, retain the complete event and offer Add anyway, Change time, and Cancel buttons unless the request already includes `add anyway`.
+5. Resolve simple scheduling details locally in the user's timezone before checking conflicts. Weekday names and three-letter abbreviations (`Mon` through `Sun`) are case-insensitive. Bare weekdays and `this`, `on`, or `every` use the next matching day, including today; `next` uses seven days later when today already matches. Shift both start and end by the same number of local calendar days, preserving clock times and overnight spans. Explicit AM/PM ranges (`8-10pm`, `8–10pm`, `8pm-10pm`) and 24-hour ranges (`20:00–22:00`) determine the clock times locally. Colons and dots in minutes are supported. An omitted AM/PM marker inherits the other endpoint's marker; if this would reverse the clocks, ask for both markers. Explicit overnight ranges end on the following local date. Bare numeric ranges without minutes or AM/PM remain parser-managed.
+6. Skip relative weekday correction for qualified dates and ranges: multiple weekday mentions, numeric dates, ordinal dates, month names, or qualifiers such as `last`, `following`, `after`, `before`, `week(s)`, `month(s)`, `today`, and `tomorrow`. AM/PM and 24-hour clock ranges are times rather than numeric dates and must not skip weekday correction; an explicit date elsewhere in the request still does. Locally applied ranges use a single explicit date or simple today/tomorrow date when supplied; otherwise they retain the parser's date. Multi-date/weekday spans retain the parser's date boundaries.
+7. Query accessible calendars for the corrected event's exact start/end interval, including requests beyond 30 days and all-day/overnight spans. On overlap, retain the complete event and offer Add anyway, Change time, and Cancel buttons unless the request already includes `add anyway`. Calendar read failures prevent creation. For recurring requests, this checks the first occurrence, not every future occurrence.
 8. Resolve the requested writable calendar and call `calendar_client.create_event(parsed_event)` using Google `date` fields for all-day events or `dateTime` fields for timed events
 9. Reply with the created event range; native all-day events are labelled `All day`
 
 Regression coverage in `tests/test_weekday_scheduling.py` verifies that a `next Monday` request on 9 September 2026 is corrected from an erroneous parser date of 12 September to 14 September before conflict checking and creation. It also covers `next Monday` requested on Monday, preservation of an overnight interval in the user's timezone, and leaving qualified dates and ranges unchanged.
+
+Regression example: with a local reference date of 8 October 2026, `Add Drills at TSA@JK on Monday 8-10pm` must create Drills on Monday 12 October, 8–10 PM, even if the parser returns Saturday 10 October. Conflict checks use the corrected Monday interval.
+
+When a single supplied weekday disagrees with an explicit date, ask which date to use before any calendar write. Named dates, ISO dates, and numeric day/month dates (with an optional four-digit year) are checked; dates without a year use the original request's local reference year. For example, `Mon 10 October 2026 8-10pm` asks for clarification because 10 October is Saturday. The existing five-minute add draft retains all supplied details. A later date or weekday answer replaces the earlier date choice; a later clock/duration answer replaces earlier time details. Cancellation, expiry, replacement, and restart follow the existing draft contract. Qualified weekdays and multiple-date requests keep parser-managed dates. `tests/test_local_scheduling.py` covers local ranges and abbreviations, clarification and its lifecycle, destination edits, future timed/all-day/overnight conflicts, and read failures.
 
 Private-chat event clarification retains the original request and successive
 answers for five minutes after each question. Replies bypass normal intent
@@ -386,6 +390,7 @@ flow. The check covers the displayed occurrence's proposed interval, including
 dates beyond 30 days, not every future occurrence of a recurring series.
 Location-only edits do not need a conflict check. Invalid time ranges are
 rejected. Supplied clock times must not be mistaken for location text.
+Simple destination weekdays and clock ranges use the same local correction as additions. In `move Monday Drills to Tue 20:00–22:00`, only the destination after `to` determines the new date. A range without a new date keeps the selected event's local date. A destination date/weekday disagreement or invalid range performs no write and asks the user to resend the edit with the intended date/time; no new pending edit draft is introduced.
 1. Detect an edit keyword such as "change", "move", "reschedule", or "update"
 2. Fetch upcoming events for the next 30 days and match the referenced event
 3. If ambiguous, present candidate buttons and retain the original edit request for five minutes
@@ -405,7 +410,7 @@ rejected. Supplied clock times must not be mistaken for location text.
 - The Calendar API's calendar list is used to show each accessible calendar's name and `backgroundColor` hex value. Users can create secondary calendars with either `create calendar School` or natural reversed wording such as `add School calendar` (including the common `calender` misspelling). Delete/remove supports both word orders and requires explicit confirmation within five minutes. The primary calendar and calendars the user does not own cannot be deleted. Lists, free-time checks, edits, deletes, and reminders span accessible calendars. A new event uses the default configured calendar unless its message explicitly names one; read-only calendars are never selected for insertion.
 - The scheduler checks reminder metadata every minute and sends the Telegram notification once.
 - Common weekly wording (`every Monday`) becomes a Google Calendar `RRULE:FREQ=WEEKLY;BYDAY=...` series. Recurring-series deletion removes the series master.
-- Before inserting an event, the app checks the next 30 days for overlap. A conflict warning retains the event and offers Add anyway, Change time, and Cancel for five minutes. The full textual `add anyway` request remains supported; those control words are removed before event-title parsing.
+- Before inserting an event, the app checks its exact requested interval for overlap across accessible calendars, including dates beyond 30 days. A conflict warning retains the event and offers Add anyway, Change time, and Cancel for five minutes. Recurring requests check only their first occurrence. The full textual `add anyway` request remains supported; those control words are removed before event-title parsing.
 - Free-time requests scan upcoming events and report one-hour-or-longer gaps from 12:00 AM through 11:59 PM.
 
 ## 9. Error Handling
@@ -552,7 +557,7 @@ unconfirmed. This change removes the single-attempt failure mode.
 
 ## 14. Current Operational Constraints
 
-- Upcoming event lists use a 7-day window; matching, conflicts, reminder management, and event-linked reminder listings use 30-day windows.
+- Upcoming event lists use a 7-day window; matching, reminder management, and event-linked reminder listings use 30-day windows. Add/edit conflicts query the requested interval; recurring changes check only the displayed/first occurrence.
 - Pending event choices, event-creation drafts, conflict choices, calendar-deletion confirmations, and recently displayed reminder lists are held in memory for five minutes and are lost on a restart.
 - Google API requests use an independent authorized HTTP transport per request because the underlying `httplib2` transport is not thread-safe. Dependency initialization is published atomically so a failed OAuth/client initialization cannot leave partial global state.
 - Independent reminder persistence depends on the cron-job.org REST API and its account quotas (normally 100 API requests per day). Without both `CRON_JOB_API_KEY` and `SERVICE_BASE_URL`, independent reminder creation is disabled while calendar features remain available.

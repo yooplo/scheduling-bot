@@ -47,6 +47,15 @@ async def test_help_callback_shows_examples_and_back_without_changing_state(monk
         else:
             text, markup = telegram.send_message.call_args.args[1:]
             assert len(text) < 3900
+            if topic == "events":
+                assert "Add Drills at TSA@JK on Monday 8-10pm" in text
+                assert "including today" in text
+                assert "'next Monday' on Monday means one week later" in text
+                assert "move Drills to Tue 20:00-22:00" in text
+                assert "weekday and date disagree" in text
+                assert "months ahead" in text
+                assert "'11pm-1am' or '23:00-01:00'" in text
+                assert "Recurring events check only the first occurrence" in text
             if topic != "menu":
                 assert markup == {"inline_keyboard":[[{"text":"Back","callback_data":"help:menu"}]]}
                 assert "\n\n" in text

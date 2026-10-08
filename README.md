@@ -4,6 +4,10 @@ A private, webhook-based FastAPI service that combines deterministic command rou
 
 Include a location naturally when creating an event, for example: `Dinner at La Pasta Saturday 7–9pm`. Locations are shown in upcoming lists when provided.
 
+Weekday names and abbreviations (`Mon` through `Sun`) work with AM/PM or 24-hour ranges: `Add Drills at TSA@JK on Mon 8-10pm` and `Add Drills at TSA@JK on Mon 20:00–22:00` both use the next matching Monday (including today), 8–10 PM. Saying `next Monday` on Monday means one week later. For overnight ranges, make both endpoints explicit, such as `11pm-1am` or `23:00-01:00`.
+
+If a weekday and date disagree, the bot asks which date to use before adding the event. For example, `Mon 10 October 2026 8-10pm` asks for clarification because that date is Saturday; reply `Mon` or `12 October 2026` to correct it. The draft retains the other details for five minutes; `/cancel` discards it. Numeric dates use day/month order (`12/10/2026`), while ISO dates (`2026-10-12`) also work. An ambiguous range such as `11-1am` asks you to specify both AM/PM markers.
+
 ## What the bot can do
 
 All requests use `USER_TIMEZONE` (normally `Asia/Singapore`).
@@ -43,6 +47,8 @@ All requests use `USER_TIMEZONE` (normally `Asia/Singapore`).
 The bot retains events that overlap an upcoming event and offers **Add anyway**, **Change time**, and **Cancel** buttons for five minutes. **Add anyway** creates the saved event without retyping; **Change time** asks for a new date/time, keeps the duration unless you change it, and checks conflicts again. You can also type `add anyway`, `change time`, or `cancel` while the warning is active. Other messages dismiss the warning and are handled normally. Old or already-used buttons cannot submit a newer draft. The full form `add anyway meeting tomorrow 2–3pm` still works; its control words are removed before title parsing.
 
 When adding an event in private chat, the bot remembers incomplete requests and asks for the missing date, time, or duration. For example, `Dentist tomorrow` → `What time?` → `2pm` → `How long?` → `1 hour` creates a 2–3pm appointment. You can answer with several details at once or say `all day` to skip time and duration. Timed events no longer default to one hour. Reply within five minutes of each question; `cancel` or `/cancel` discards the draft. A new slash command or explicit `add`/`create`/`put` request starts fresh. Drafts are lost when the bot restarts.
+
+New-event conflict checks cover the event's requested interval across accessible calendars, even months ahead, including all-day and overnight events. A calendar read failure prevents creation. Recurring additions check their first occurrence rather than every future occurrence.
 
 Free-time results cover the full day, from 12:00 AM through 11:59 PM, and show slots of at least one hour. They include events from every calendar the user can view. New events go to the configured default calendar unless a writable named calendar is explicitly specified.
 
@@ -156,9 +162,13 @@ Use `/help` in private chat to browse feature categories and copy example
 messages. Each category has a Back button. In the configured group, `/help`
 shows only schedule help and person-selection buttons. Sending `/help` clears
 your pending conversation choices; browsing categories does not. The welcome
-message also points to `/help`.
+message also points to `/help`. Events help includes a weekday with a compact
+time range (`Monday 8-10pm`), abbreviations and 24-hour ranges, and explains how
+weekdays and `next Monday` resolve and when date clarification is needed.
 
 ## Event selection
+
+Edits accept the same weekday abbreviations and ranges: `move Drills to Tue 20:00-22:00`. A range without a new date keeps the selected event's date. If an edit's weekday/date disagree or its range is invalid, the bot asks you to resend the edit with the intended date and time.
 
 Edits that change an event's time are checked for overlaps at the proposed
 date, including dates beyond the next 30 days. A conflict offers **Apply anyway**

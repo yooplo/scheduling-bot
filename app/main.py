@@ -29,6 +29,16 @@ REMINDER_LIST_PHRASES = ("reminders", "upcoming reminders", "all reminders", "sh
 FREE_TIME_PHRASES = ("when am i free", "when i'm free", "find free time", "free timing", "free slot", "availability")
 LIST_WORDS = ("list", "show", "what's on", "whats on", "what are my", "upcoming", "plan", "plans", "schedule")
 PENDING_TTL_SECONDS = 300
+WEEKDAY_NAMES = r"mon(?:day)?|tue(?:sday)?|wed(?:nesday)?|thu(?:rsday)?|fri(?:day)?|sat(?:urday)?|sun(?:day)?"
+MONTH_NAMES = r"jan(?:uary)?|feb(?:ruary)?|mar(?:ch)?|apr(?:il)?|may|jun(?:e)?|jul(?:y)?|aug(?:ust)?|sep(?:t(?:ember)?)?|oct(?:ober)?|nov(?:ember)?|dec(?:ember)?"
+NAMED_DATE_PATTERN = rf"\b(\d{{1,2}})(?:st|nd|rd|th)?\s+({MONTH_NAMES})(?:\s+(\d{{4}}))?\b"
+NUMERIC_DATE_PATTERN = r"\b(?:(\d{4})-(\d{1,2})-(\d{1,2})|(\d{1,2})[-/](\d{1,2})(?:[-/](\d{4}))?)\b(?![-/]\d)"
+DATE_HINT_PATTERN = rf"\b(?:{WEEKDAY_NAMES}|{MONTH_NAMES}|today|tonight|tomorrow|tmr|next|this|last|following|after|before|weeks?|months?)\b|{NUMERIC_DATE_PATTERN}"
+TIME_HINT_PATTERN = r"\b\d{1,2}[:.]\d{2}|\b\d{1,2}\s*(?:am|pm)\b|\b(?:all|whole)[\s-]+day\b|\b(?:hours?|minutes?|hrs?|mins?|until|till|duration)\b"
+CLOCK_RANGE_PATTERN = re.compile(
+    r"\b(\d{1,2})(?:[:.](\d{2}))?\s*(am|pm)?\s*[-–—]\s*(\d{1,2})(?:[:.](\d{2}))?\s*(am|pm)?\b",
+    flags=re.IGNORECASE,
+)
 
 
 @dataclass
@@ -789,6 +799,16 @@ async def handle_message(chat_id: int, text: str, settings: Settings, telegram: 
 async def _add_event(chat_id, text, settings, telegram, calendar, parser, now=None):
     lowered = text.lower()
     now = now or datetime.now(settings.timezone)
+    date_text = _latest_detail_text(text, DATE_HINT_PATTERN, remove_ranges=True)
+    time_text = _latest_detail_text(text, TIME_HINT_PATTERN)
+    try:
+        question = _weekday_date_question(date_text, settings, now)
+        clocks = _clock_range_from_text(time_text)
+    except ValueError as exc:
+        question = str(exc)
+    if question:
+        await _ask_event_detail(chat_id, text, question, now, telegram)
+        return
     if (
         _is_explicit_add_request(lowered)
         and "\nUser follow-up:" not in text
@@ -801,6 +821,8 @@ async def _add_event(chat_id, text, settings, telegram, calendar, parser, now=No
     event = _explicit_all_day_event(text, settings) or await asyncio.to_thread(
         parser.parse_event, _event_parser_text(text), now, settings.user_timezone,
     )
+    if clocks:
+        _apply_clock_range(event, clocks, date_text, settings, now)
     missing = getattr(event, "missing_fields", [])
     question = next((prompt for field, prompt in (
         ("date", "Which date?"),
@@ -824,8 +846,8 @@ async def _add_event(chat_id, text, settings, telegram, calendar, parser, now=No
         await _ask_event_detail(chat_id, text, "When should it end? Please give an end time after the start, or a positive duration.", now, telegram)
         return
     pending_event_drafts.pop(chat_id, None)
-    _apply_weekday_from_text(event, text, now)
-    conflicts = [existing for existing in await asyncio.to_thread(calendar.list_events, 30) if existing.start < event.end and (existing.end or existing.start) > event.start]
+    _apply_weekday_from_text(event, date_text, now)
+    conflicts = [existing for existing in await asyncio.to_thread(calendar._list_events_between, event.start, event.end) if existing.start < event.end and (existing.end or existing.start) > event.start]
     if conflicts and "add anyway" not in lowered:
         details = "\n".join(f"• {existing.title} — {_format_event_range(existing)}" for existing in conflicts[:3])
         token = uuid4().hex
@@ -920,6 +942,16 @@ async def _remove_scheduled_reminder(reminder: ScheduledReminder, calendar: Cale
 
 
 async def _edit_event(chat_id: int, text: str, existing: CalendarEvent, settings: Settings, telegram: TelegramClient, calendar: CalendarClient, parser: GroqParser) -> None:
+    now = datetime.now(settings.timezone)
+    destination = re.split(r"\bto\b", text, maxsplit=1, flags=re.IGNORECASE)[-1]
+    try:
+        question = _weekday_date_question(destination, settings, now)
+        clocks = _clock_range_from_text(destination)
+    except ValueError as exc:
+        question = str(exc)
+    if question:
+        await telegram.send_message(chat_id, f"{question}\nPlease resend the edit with the intended date and time.")
+        return
     location_match = re.search(r"\b(?:to\s+be\s+)?at\s+(.+?)\s*$", text, flags=re.IGNORECASE)
     if location_match and not _has_explicit_event_time(text):
         edited = ParsedEdit(
@@ -928,6 +960,13 @@ async def _edit_event(chat_id: int, text: str, existing: CalendarEvent, settings
         )
     else:
         edited = await asyncio.to_thread(parser.parse_edit, text, existing, settings.user_timezone)
+        if clocks:
+            if not re.search(DATE_HINT_PATTERN, _without_clock_ranges(destination), flags=re.IGNORECASE):
+                edited.start = existing.start
+                edited.end = existing.start
+            _apply_clock_range(edited, clocks, destination, settings, now)
+        if edited.start.tzinfo is not None and edited.end.tzinfo is not None:
+            _apply_weekday_from_text(edited, destination, now)
     _apply_all_day_from_text(edited, text, settings)
     if edited.confidence == "low" or edited.start.tzinfo is None or edited.end.tzinfo is None:
         await telegram.send_message(chat_id, "I need a clearer change. For example: 'move IPPT on Saturday to 4pm'.")
@@ -1091,7 +1130,7 @@ def _explicit_all_day_event(text: str, settings: Settings) -> ParsedEvent | None
     """Parse concise '<day> whole day with <title>' requests without the LLM."""
     normalized = re.sub(r"^\s*add(?:\s+anyway)?\s+", "", text.strip(), flags=re.IGNORECASE)
     match = re.match(
-        r"(?P<when>(?:on\s+)?(?:monday|tuesday|wednesday|thursday|friday|saturday|sunday|"
+        rf"(?P<when>(?:on\s+)?(?:{WEEKDAY_NAMES}|"
         r"\d{1,2}(?:st|nd|rd|th)?\s+(?:jan(?:uary)?|feb(?:ruary)?|mar(?:ch)?|apr(?:il)?|may|"
         r"jun(?:e)?|jul(?:y)?|aug(?:ust)?|sep(?:t(?:ember)?)?|oct(?:ober)?|nov(?:ember)?|dec(?:ember)?)(?:\s+\d{4})?))"
         r"\s+(?:all|whole)[\s-]+day\s+(?:with|for)\s+(?P<title>.+?)\s*$",
@@ -1111,17 +1150,11 @@ def _explicit_all_day_event(text: str, settings: Settings) -> ParsedEvent | None
     )
 
 
-def _calendar_date_from_text(text: str, settings: Settings):
-    match = re.search(
-        r"\b(\d{1,2})(?:st|nd|rd|th)?\s+"
-        r"(jan(?:uary)?|feb(?:ruary)?|mar(?:ch)?|apr(?:il)?|may|jun(?:e)?|jul(?:y)?|"
-        r"aug(?:ust)?|sep(?:t(?:ember)?)?|oct(?:ober)?|nov(?:ember)?|dec(?:ember)?)"
-        r"(?:\s+(\d{4}))?\b",
-        text, flags=re.IGNORECASE,
-    )
+def _calendar_date_from_text(text: str, settings: Settings, now=None):
+    match = re.search(NAMED_DATE_PATTERN, text, flags=re.IGNORECASE)
     if not match:
         return None
-    year = int(match.group(3) or datetime.now(settings.timezone).year)
+    year = int(match.group(3) or (now or datetime.now(settings.timezone)).year)
     month = "Sep" if match.group(2).lower() == "sept" else match.group(2)
     value = f"{match.group(1)} {month} {year}"
     for format_string in ("%d %B %Y", "%d %b %Y"):
@@ -1167,6 +1200,100 @@ def _date_from_text(text: str, settings: Settings):
     return _calendar_date_from_text(text, settings)
 
 
+def _without_clock_ranges(text: str) -> str:
+    return CLOCK_RANGE_PATTERN.sub(
+        lambda match: "" if match[3] or match[6] or (match[2] is not None and match[5] is not None) else match[0], text,
+    )
+
+
+def _latest_detail_text(text: str, pattern: str, *, remove_ranges=False) -> str:
+    parts = text.split("\nUser follow-up:")
+    for part in reversed(parts):
+        if part.strip().startswith("Change the event's date/time using my next answer."):
+            continue
+        if re.search(pattern, _without_clock_ranges(part) if remove_ranges else part, flags=re.IGNORECASE):
+            return part
+    return parts[0]
+
+
+def _explicit_schedule_date(text: str, settings: Settings, now: datetime):
+    text = _without_clock_ranges(text)
+    named = list(re.finditer(NAMED_DATE_PATTERN, text, flags=re.IGNORECASE))
+    numeric = list(re.finditer(NUMERIC_DATE_PATTERN, text))
+    if len(named) + len(numeric) != 1:
+        return None
+    if named:
+        day = _calendar_date_from_text(text, settings, now)
+        if day is None:
+            raise ValueError("That date is invalid. Which date should I use?")
+        return day
+    match = numeric[0]
+    year, month, day = (int(match[1]), int(match[2]), int(match[3])) if match[1] else (
+        int(match[6] or now.year), int(match[5]), int(match[4]),
+    )
+    try:
+        return datetime(year, month, day).date()
+    except ValueError as exc:
+        raise ValueError("That date is invalid. Which date should I use?") from exc
+
+
+def _weekday_date_question(text: str, settings: Settings, now: datetime) -> str | None:
+    day = _explicit_schedule_date(text, settings, now)
+    weekdays = re.findall(rf"\b({WEEKDAY_NAMES})\b", text, flags=re.IGNORECASE)
+    if day is not None and len(weekdays) == 1 and weekdays[0][:3].lower() != day.strftime("%a").lower():
+        return f"{weekdays[0].capitalize()} and {day.day} {day:%B %Y} ({day:%A}) don't match. Which date should I use?"
+    return None
+
+
+def _clock_range_from_text(text: str):
+    matches = [match for match in CLOCK_RANGE_PATTERN.finditer(text)
+               if match[3] or match[6] or (match[2] is not None and match[5] is not None)]
+    if not matches:
+        return None
+    if len(matches) != 1:
+        raise ValueError("Which time range should I use? Please give one start and end time.")
+    match = matches[0]
+    clocks = []
+    for hour, minute, period in ((match[1], match[2], match[3] or match[6]), (match[4], match[5], match[6] or match[3])):
+        hour, minute = int(hour), int(minute or 0)
+        if minute > 59 or not (1 <= hour <= 12 if period else 0 <= hour <= 23):
+            raise ValueError("Please give a valid time range, such as '8pm-10pm' or '20:00-22:00'.")
+        if period:
+            hour = hour % 12 + (12 if period.lower() == "pm" else 0)
+        clocks.append((hour, minute))
+    if clocks[0] == clocks[1] or (bool(match[3]) != bool(match[6]) and clocks[1] < clocks[0]):
+        raise ValueError("Please make the start and end clear, including both AM/PM markers, such as '11pm-1am'.")
+    return clocks
+
+
+def _apply_clock_range(event, clocks, text, settings, now):
+    if event.all_day or (event.start is not None and event.start.tzinfo is None):
+        return
+    day = _relative_weekday_date(text, now) or _explicit_schedule_date(text, settings, now)
+    relative = re.findall(r"\b(today|tonight|tomorrow|tmr)\b", text, flags=re.IGNORECASE)
+    if day is None and len(relative) == 1:
+        day = now.date() + timedelta(days=relative[0].lower() in {"tomorrow", "tmr"})
+    local_day = day or (event.start.astimezone(now.tzinfo).date() if event.start is not None else None)
+    if local_day is None:
+        return
+    span = 0
+    multiple_dates = len(re.findall(NAMED_DATE_PATTERN, text, flags=re.IGNORECASE)) + len(re.findall(NUMERIC_DATE_PATTERN, _without_clock_ranges(text))) > 1
+    multiple_weekdays = len(re.findall(rf"\b({WEEKDAY_NAMES})\b", text, flags=re.IGNORECASE)) > 1
+    if (multiple_dates or multiple_weekdays) and event.start is not None and event.end is not None and event.end.tzinfo is not None:
+        span = max(0, (event.end.astimezone(now.tzinfo).date() - local_day).days)
+    start = now.replace(year=local_day.year, month=local_day.month, day=local_day.day,
+                        hour=clocks[0][0], minute=clocks[0][1], second=0, microsecond=0)
+    end = start.replace(hour=clocks[1][0], minute=clocks[1][1]) + timedelta(days=span)
+    if end < start:
+        end += timedelta(days=1)
+    event.start, event.end = start, end
+    missing = getattr(event, "missing_fields", [])
+    if missing:
+        event.missing_fields = [field for field in missing if field not in {"time", "duration"} and not (field == "date" and day is not None)]
+        if not event.missing_fields:
+            event.confidence = "high"
+
+
 def _apply_weekday_from_text(event: ParsedEvent, text: str, now: datetime) -> None:
     """Resolve a single relative weekday locally before checking conflicts."""
     target = _relative_weekday_date(text, now)
@@ -1180,34 +1307,34 @@ def _apply_weekday_from_text(event: ParsedEvent, text: str, now: datetime) -> No
 
 
 def _relative_weekday_date(text: str, now: datetime):
-    weekdays = ("monday", "tuesday", "wednesday", "thursday", "friday", "saturday", "sunday")
+    weekdays = ("mon", "tue", "wed", "thu", "fri", "sat", "sun")
     matches = list(re.finditer(
-        r"\b(?:(next|this|on|every)\s+)?(monday|tuesday|wednesday|thursday|friday|saturday|sunday)\b",
+        rf"\b(?:(next|this|on|every)\s+)?({WEEKDAY_NAMES})\b",
         text, flags=re.IGNORECASE,
     ))
+    date_text = _without_clock_ranges(text)
     # Leave date ranges and qualified calendar dates to the parser.
     if len(matches) != 1 or re.search(
         r"\b\d{1,4}[-/]\d{1,2}|\b\d{1,2}(?:st|nd|rd|th)\b|"
-        r"\b(?:jan(?:uary)?|feb(?:ruary)?|mar(?:ch)?|apr(?:il)?|may|jun(?:e)?|"
-        r"jul(?:y)?|aug(?:ust)?|sep(?:t(?:ember)?)?|oct(?:ober)?|nov(?:ember)?|dec(?:ember)?)\b|"
+        rf"\b(?:{MONTH_NAMES})\b|"
         r"\b(?:last|following|after|before|weeks?|months?|today|tomorrow)\b",
-        text, flags=re.IGNORECASE,
+        date_text, flags=re.IGNORECASE,
     ):
         return
     match = matches[0]
-    offset = (weekdays.index(match.group(2).lower()) - now.weekday()) % 7
+    offset = (weekdays.index(match.group(2)[:3].lower()) - now.weekday()) % 7
     if offset == 0 and (match.group(1) or "").lower() == "next":
         offset = 7
     return now.date() + timedelta(days=offset)
 
 
 def _upcoming_weekday_from_text(text: str, settings: Settings):
-    match = re.search(r"\b(monday|tuesday|wednesday|thursday|friday|saturday|sunday)\b", text, flags=re.IGNORECASE)
+    match = re.search(rf"\b({WEEKDAY_NAMES})\b", text, flags=re.IGNORECASE)
     if not match:
         return None
-    weekday_names = ("monday", "tuesday", "wednesday", "thursday", "friday", "saturday", "sunday")
+    weekday_names = ("mon", "tue", "wed", "thu", "fri", "sat", "sun")
     today = datetime.now(settings.timezone).date()
-    offset = (weekday_names.index(match.group(1).lower()) - today.weekday()) % 7
+    offset = (weekday_names.index(match.group(1)[:3].lower()) - today.weekday()) % 7
     return today + timedelta(days=offset)
 
 
@@ -1281,13 +1408,19 @@ def _format_time(value: datetime | None) -> str:
 HELP_TOPICS = {
     "events": ("Events", "Events — send a message like:\n\n"
         "Dentist tomorrow 2–3pm\n"
+        "Add Drills at TSA@JK on Monday 8-10pm\n"
+        "move Drills to Tue 20:00-22:00\n"
         "add Friday whole day with Ames\n"
         "Gym every Monday at 8pm for 1 hour\n"
         "what are my plans tomorrow?\n"
         "move Dentist to Friday at 4pm\n"
         "delete Dentist tomorrow\n\n"
+        "A weekday uses the next matching day, including today; 'next Monday' on Monday means one week later. "
+        "Mon–Sun abbreviations and 24-hour ranges work too. If a weekday and date disagree, I ask which date to use. "
+        "For overnight ranges, use '11pm-1am' or '23:00-01:00'. "
         "I ask for missing dates, times, or duration. Tap an event if several match. "
-        "Conflicts offer Add anyway (or Apply anyway for edits) and Cancel. "
+        "Conflicts are checked at the requested date, even months ahead, and offer Add anyway (or Apply anyway for edits) and Cancel. "
+        "Recurring events check only the first occurrence. "
         "Say 'weekly series' when editing or deleting all occurrences."),
     "reminders": ("Reminders", "Reminders — send a message like:\n\n"
         "remind me in 10 minutes to check the oven\n"
@@ -1584,11 +1717,11 @@ def _reminder_minutes_from_text(text: str) -> int | None:
 
 def _apply_recurrence_from_text(event, text: str) -> None:
     """Ensure common weekly recurrence wording never relies on optional LLM output."""
-    match = re.search(r"\bevery\s+(monday|tuesday|wednesday|thursday|friday|saturday|sunday)\b", text.lower())
+    match = re.search(rf"\bevery\s+({WEEKDAY_NAMES})\b", text.lower())
     if not match:
         return
-    weekdays = {"monday": (0, "MO"), "tuesday": (1, "TU"), "wednesday": (2, "WE"), "thursday": (3, "TH"), "friday": (4, "FR"), "saturday": (5, "SA"), "sunday": (6, "SU")}
-    target_day, rrule_day = weekdays[match.group(1)]
+    weekdays = {"mon": (0, "MO"), "tue": (1, "TU"), "wed": (2, "WE"), "thu": (3, "TH"), "fri": (4, "FR"), "sat": (5, "SA"), "sun": (6, "SU")}
+    target_day, rrule_day = weekdays[match.group(1)[:3]]
     offset = (target_day - event.start.weekday()) % 7
     if offset:
         event.start += timedelta(days=offset)
