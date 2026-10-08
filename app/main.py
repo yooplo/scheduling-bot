@@ -508,16 +508,17 @@ async def handle_message(chat_id: int, text: str, settings: Settings, telegram: 
         await _show_reminder_status(chat_id, telegram, calendar, cron)
         return
     saved = pending_actions.get(chat_id)
-    if saved and saved.action in {"created", "created_edit"}:
+    if saved and saved.action in {"created", "created_edit", "created_date"}:
         pending_actions.pop(chat_id, None)
         if lowered == "cancel" or command == "cancel":
             await telegram.send_message(chat_id, "Event shortcuts cancelled. The saved event is unchanged.")
             return
-        if saved.action == "created_edit" and not text.lstrip().startswith("/") and not _is_explicit_add_request(lowered):
+        if saved.action in {"created_edit", "created_date"} and not text.lstrip().startswith("/") and not _is_explicit_add_request(lowered):
             if saved.expires_at <= time.monotonic():
-                await telegram.send_message(chat_id, "That time-change prompt expired. Please send a new edit request.")
+                await telegram.send_message(chat_id, "That date/time-change prompt expired. Please send a new edit request.")
                 return
-            await _edit_event(chat_id, f"move {saved.request_text or 'this event'} to {text}", saved.events[0], settings, telegram, calendar, parser)
+            await _edit_event(chat_id, f"move {saved.request_text or 'this event'} to {text}", saved.events[0], settings, telegram, calendar, parser,
+                              preserve_clock=saved.action == "created_date")
             return
     conflict = pending_event_conflicts.get(chat_id)
     if conflict:
@@ -928,6 +929,7 @@ async def _create_event(chat_id, event, telegram, calendar):
                                            "created", "weekly series" if event.recurrence else "", token)
     buttons = [[{"text": label, "callback_data": f"created:{token}:{action}"} for label, action in (
         ("Change series time" if event.recurrence else "Change time", "change"),
+        ("Change series date" if event.recurrence else "Change date", "date"),
         ("Delete series" if event.recurrence else "Delete this event", "delete"),
     )]]
     controls = "\nThese buttons affect the whole series." if event.recurrence else ""
@@ -935,7 +937,7 @@ async def _create_event(chat_id, event, telegram, calendar):
 
 
 async def handle_created_callback(chat_id, callback_id, data, telegram, calendar):
-    match = re.fullmatch(r"created:([a-f0-9]{32}):(change|delete)", data)
+    match = re.fullmatch(r"created:([a-f0-9]{32}):(change|date|delete)", data)
     pending = pending_actions.get(chat_id)
     if not match or not pending or pending.action != "created" or pending.token != match.group(1) or pending.expires_at <= time.monotonic():
         if pending and pending.expires_at <= time.monotonic():
@@ -943,8 +945,8 @@ async def handle_created_callback(chat_id, callback_id, data, telegram, calendar
         await telegram.answer_callback_query(callback_id, "These event shortcuts expired or were already used. Please send a new edit/delete request.")
         return
     pending_actions.pop(chat_id, None)
-    if match.group(2) == "change":
-        pending.action = "created_edit"
+    if match.group(2) in {"change", "date"}:
+        pending.action = "created_date" if match.group(2) == "date" else "created_edit"
         pending.token = uuid4().hex
         pending.expires_at = time.monotonic() + PENDING_TTL_SECONDS
         pending_actions[chat_id] = pending
@@ -958,7 +960,9 @@ async def handle_created_callback(chat_id, callback_id, data, telegram, calendar
             await _delete_event(chat_id, event, telegram, calendar)
     else:
         scope = "the whole series" if pending.request_text else "this event"
-        await telegram.send_message(chat_id, f"What date or time should I use for {scope}: {event.title} — {_format_event_range(event)}?\nFor example, 'Tue 20:00-22:00'. Reply within 5 minutes, or send /cancel.")
+        question = "What date should I use" if match.group(2) == "date" else "What date or time should I use"
+        example = "For example, 'Tue' or '13 October'. Date-only replies keep the current time and duration." if match.group(2) == "date" else "For example, 'Tue 20:00-22:00'."
+        await telegram.send_message(chat_id, f"{question} for {scope}: {event.title} — {_format_event_range(event)}?\n{example} Reply within 5 minutes, or send /cancel.")
 
 
 async def _ask_event_detail(chat_id, text, question, now, telegram):
@@ -992,7 +996,7 @@ async def _remove_scheduled_reminder(reminder: ScheduledReminder, calendar: Cale
         )
 
 
-async def _edit_event(chat_id: int, text: str, existing: CalendarEvent, settings: Settings, telegram: TelegramClient, calendar: CalendarClient, parser: GroqParser) -> None:
+async def _edit_event(chat_id: int, text: str, existing: CalendarEvent, settings: Settings, telegram: TelegramClient, calendar: CalendarClient, parser: GroqParser, *, preserve_clock=False) -> None:
     now = datetime.now(settings.timezone)
     destination = re.split(r"\bto\b", text, maxsplit=1, flags=re.IGNORECASE)[-1]
     try:
@@ -1022,6 +1026,13 @@ async def _edit_event(chat_id: int, text: str, existing: CalendarEvent, settings
     if edited.confidence == "low" or edited.start.tzinfo is None or edited.end.tzinfo is None:
         await telegram.send_message(chat_id, "I need a clearer change. For example: 'move IPPT on Saturday to 4pm'.")
         return
+    if preserve_clock and not _has_explicit_event_time(destination) and not re.search(r"\b(?:all|whole)[\s-]+day\b", destination, flags=re.IGNORECASE):
+        target = _local_schedule_date(destination, settings, now) or edited.start.astimezone(settings.timezone).date()
+        local_start = existing.start.astimezone(settings.timezone)
+        local_end = (existing.end or existing.start).astimezone(settings.timezone)
+        shift = target - local_start.date()
+        edited.start, edited.end = local_start + shift, local_end + shift
+        edited.all_day = existing.all_day
     if edited.end <= edited.start:
         await telegram.send_message(chat_id, "Please give an end time after the start.")
         return
@@ -1317,13 +1328,18 @@ def _clock_range_from_text(text: str):
     return clocks
 
 
-def _apply_clock_range(event, clocks, text, settings, now):
-    if event.all_day or (event.start is not None and event.start.tzinfo is None):
-        return
+def _local_schedule_date(text, settings, now):
     day = _relative_weekday_date(text, now) or _explicit_schedule_date(text, settings, now)
     relative = re.findall(r"\b(today|tonight|tomorrow|tmr)\b", text, flags=re.IGNORECASE)
     if day is None and len(relative) == 1:
         day = now.date() + timedelta(days=relative[0].lower() in {"tomorrow", "tmr"})
+    return day
+
+
+def _apply_clock_range(event, clocks, text, settings, now):
+    if event.all_day or (event.start is not None and event.start.tzinfo is None):
+        return
+    day = _local_schedule_date(text, settings, now)
     local_day = day or (event.start.astimezone(now.tzinfo).date() if event.start is not None else None)
     if local_day is None:
         return
@@ -1423,7 +1439,7 @@ async def _ask_to_select(chat_id: int, action: str, request_text: str, events: l
 async def handle_selection_callback(chat_id, callback_id, data, settings, telegram, calendar, parser, cron=None):
     match = re.fullmatch(r"select:([a-f0-9]{32}):(cancel|[1-9]\d*)", data)
     pending = pending_actions.get(chat_id)
-    if not match or not pending or pending.action in {"created", "created_edit"} or pending.token != match.group(1) or pending.expires_at <= time.monotonic():
+    if not match or not pending or pending.action in {"created", "created_edit", "created_date"} or pending.token != match.group(1) or pending.expires_at <= time.monotonic():
         if pending and pending.expires_at <= time.monotonic():
             pending_actions.pop(chat_id, None)
         await telegram.answer_callback_query(callback_id, "This selection expired or was already used. Please send your request again.")
@@ -1472,7 +1488,7 @@ HELP_TOPICS = {
         "I ask for missing dates, times, or duration. Tap an event if several match. "
         "Conflicts are checked at the requested date, even months ahead, and offer Add anyway (or Apply anyway for edits) and Cancel. "
         "Recurring events check only the first occurrence. "
-        "After adding, Change time and Delete this event buttons work for 5 minutes; recurring-event buttons affect the whole series. "
+        "After adding, Change time, Change date and Delete this event buttons work for 5 minutes; date-only replies keep the time and duration. Recurring-event buttons affect the whole series. "
         "Say 'weekly series' when editing or deleting all occurrences."),
     "reminders": ("Reminders", "Reminders — send a message like:\n\n"
         "remind me in 10 minutes to check the oven\n"
