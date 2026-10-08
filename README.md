@@ -50,6 +50,10 @@ When adding an event in private chat, the bot remembers incomplete requests and 
 
 New-event conflict checks cover the event's requested interval across accessible calendars, even months ahead, including all-day and overnight events. A calendar read failure prevents creation. Recurring additions check their first occurrence rather than every future occurrence.
 
+After adding an event, the success reply offers **Change time** and **Delete this event** for five minutes. Change time asks for a new date/time, then edits that saved event without creating another or searching by title; `4pm` keeps its duration, while `Tue 20:00-22:00` changes its day and range. Overlaps offer Apply anyway/Cancel. Delete this event removes the saved event immediately. Recurring additions instead offer **Change series time** and **Delete series**, which affect the whole series.
+
+Only the latest addition's buttons remain active. A new message dismisses unused buttons. After tapping Change time, reply within five minutes; `/cancel` keeps the event unchanged, and a new slash command or explicit add/create/put request replaces the prompt. Buttons and prompts are lost on restart. Invalid answers or failed operations consume the shortcut; inspect your calendar and send a fresh full edit/delete request. Calendar and attached reminder metadata are preserved by time edits.
+
 Free-time results cover the full day, from 12:00 AM through 11:59 PM, and show slots of at least one hour. They include events from every calendar the user can view. New events go to the configured default calendar unless a writable named calendar is explicitly specified.
 
 Messages that explicitly say `all day` or `whole day` create native Google Calendar all-day events using date-only boundaries, rather than timed events from 12:00 AM to 11:59 PM. Concise forms such as `add Friday whole day with Ames` are parsed deterministically. Multi-day all-day events use Google's exclusive end-date convention.
@@ -80,7 +84,7 @@ Reminder wording determines whether a notification is independent or event-linke
 ## Current limitations
 
 - One or two preconfigured Telegram/Google accounts only. Each account can access and manage multiple calendars; adding users or changing linked accounts dynamically requires a database and web OAuth flow.
-- No voice-message transcription, attendee/invitation management, arbitrary user sign-up, or undo action.
+- No voice-message transcription, attendee/invitation management, arbitrary user sign-up, or general undo action. A recently added event can be deleted using its five-minute success-reply button.
 - Only common weekly recurrence wording is supported; arbitrary recurrence schedules are not exposed as a dedicated command flow.
 - Scheduler-based reminders and daily agenda require the cron-job.org setup below; confirm successful `204` job runs before relying on them.
 

@@ -143,7 +143,7 @@ async def webhook(request: Request, x_telegram_bot_api_secret_token: str | None 
     if callback:
         chat_id = callback.get("message", {}).get("chat", {}).get("id")
         sender_id = callback.get("from", {}).get("id")
-        if callback.get("data", "").startswith(("conflict:", "select:", "help:")):
+        if callback.get("data", "").startswith(("conflict:", "select:", "help:", "created:")):
             if callback.get("message", {}).get("chat", {}).get("type") != "private" or chat_id != sender_id or sender_id not in calendars:
                 await telegram.answer_callback_query(callback.get("id", ""), "Not available here.")
                 return {"ok": True}
@@ -155,6 +155,8 @@ async def webhook(request: Request, x_telegram_bot_api_secret_token: str | None 
                         await _send_help(chat_id, telegram, topic)
                 elif callback["data"].startswith("select:"):
                     await handle_selection_callback(chat_id, callback.get("id", ""), callback["data"], settings, telegram, calendars[sender_id], parser, cron)
+                elif callback["data"].startswith("created:"):
+                    await handle_created_callback(chat_id, callback.get("id", ""), callback["data"], telegram, calendars[sender_id])
                 else:
                     await handle_conflict_callback(chat_id, callback.get("id", ""), callback["data"], settings, telegram, calendars[sender_id])
             except Exception:
@@ -505,6 +507,18 @@ async def handle_message(chat_id: int, text: str, settings: Settings, telegram: 
         recent_reminder_lists.pop(chat_id, None)
         await _show_reminder_status(chat_id, telegram, calendar, cron)
         return
+    saved = pending_actions.get(chat_id)
+    if saved and saved.action in {"created", "created_edit"}:
+        pending_actions.pop(chat_id, None)
+        if lowered == "cancel" or command == "cancel":
+            await telegram.send_message(chat_id, "Event shortcuts cancelled. The saved event is unchanged.")
+            return
+        if saved.action == "created_edit" and not text.lstrip().startswith("/") and not _is_explicit_add_request(lowered):
+            if saved.expires_at <= time.monotonic():
+                await telegram.send_message(chat_id, "That time-change prompt expired. Please send a new edit request.")
+                return
+            await _edit_event(chat_id, f"move {saved.request_text or 'this event'} to {text}", saved.events[0], settings, telegram, calendar, parser)
+            return
     conflict = pending_event_conflicts.get(chat_id)
     if conflict:
         choice = {"add anyway": "add", "apply anyway": "add", "change time": "change", "cancel": "cancel", "/cancel": "cancel"}.get(lowered)
@@ -907,7 +921,44 @@ async def _create_event(chat_id, event, telegram, calendar):
         reminder_confirmation = "\n⏰ " + _reminder_confirmation(event.reminders)
     recurrence_confirmation = "\n🔁 Repeats weekly" if event.recurrence else ""
     calendar_confirmation = f"\n🗓️ Calendar: {target_calendar.name}" if target_calendar else ""
-    await telegram.send_message(chat_id, f"✅ Added: {created.title} — {_format_event_range(created)}{calendar_confirmation}{recurrence_confirmation}{reminder_confirmation}")
+    token = uuid4().hex
+    if event.recurrence:
+        created = created.model_copy(update={"recurring_event_id": created.event_id})
+    pending_actions[chat_id] = PendingAction([created], time.monotonic() + PENDING_TTL_SECONDS,
+                                           "created", "weekly series" if event.recurrence else "", token)
+    buttons = [[{"text": label, "callback_data": f"created:{token}:{action}"} for label, action in (
+        ("Change series time" if event.recurrence else "Change time", "change"),
+        ("Delete series" if event.recurrence else "Delete this event", "delete"),
+    )]]
+    controls = "\nThese buttons affect the whole series." if event.recurrence else ""
+    await telegram.send_message(chat_id, f"✅ Added: {created.title} — {_format_event_range(created)}{calendar_confirmation}{recurrence_confirmation}{reminder_confirmation}{controls}\nChange or delete using the buttons within 5 minutes.", {"inline_keyboard": buttons})
+
+
+async def handle_created_callback(chat_id, callback_id, data, telegram, calendar):
+    match = re.fullmatch(r"created:([a-f0-9]{32}):(change|delete)", data)
+    pending = pending_actions.get(chat_id)
+    if not match or not pending or pending.action != "created" or pending.token != match.group(1) or pending.expires_at <= time.monotonic():
+        if pending and pending.expires_at <= time.monotonic():
+            pending_actions.pop(chat_id, None)
+        await telegram.answer_callback_query(callback_id, "These event shortcuts expired or were already used. Please send a new edit/delete request.")
+        return
+    pending_actions.pop(chat_id, None)
+    if match.group(2) == "change":
+        pending.action = "created_edit"
+        pending.token = uuid4().hex
+        pending.expires_at = time.monotonic() + PENDING_TTL_SECONDS
+        pending_actions[chat_id] = pending
+    await telegram.answer_callback_query(callback_id)
+    event = pending.events[0]
+    if match.group(2) == "delete":
+        if pending.request_text:
+            await asyncio.to_thread(calendar.delete_series, event)
+            await telegram.send_message(chat_id, f"✅ Deleted recurring series: {event.title}")
+        else:
+            await _delete_event(chat_id, event, telegram, calendar)
+    else:
+        scope = "the whole series" if pending.request_text else "this event"
+        await telegram.send_message(chat_id, f"What date or time should I use for {scope}: {event.title} — {_format_event_range(event)}?\nFor example, 'Tue 20:00-22:00'. Reply within 5 minutes, or send /cancel.")
 
 
 async def _ask_event_detail(chat_id, text, question, now, telegram):
@@ -1372,7 +1423,7 @@ async def _ask_to_select(chat_id: int, action: str, request_text: str, events: l
 async def handle_selection_callback(chat_id, callback_id, data, settings, telegram, calendar, parser, cron=None):
     match = re.fullmatch(r"select:([a-f0-9]{32}):(cancel|[1-9]\d*)", data)
     pending = pending_actions.get(chat_id)
-    if not match or not pending or pending.token != match.group(1) or pending.expires_at <= time.monotonic():
+    if not match or not pending or pending.action in {"created", "created_edit"} or pending.token != match.group(1) or pending.expires_at <= time.monotonic():
         if pending and pending.expires_at <= time.monotonic():
             pending_actions.pop(chat_id, None)
         await telegram.answer_callback_query(callback_id, "This selection expired or was already used. Please send your request again.")
@@ -1421,6 +1472,7 @@ HELP_TOPICS = {
         "I ask for missing dates, times, or duration. Tap an event if several match. "
         "Conflicts are checked at the requested date, even months ahead, and offer Add anyway (or Apply anyway for edits) and Cancel. "
         "Recurring events check only the first occurrence. "
+        "After adding, Change time and Delete this event buttons work for 5 minutes; recurring-event buttons affect the whole series. "
         "Say 'weekly series' when editing or deleting all occurrences."),
     "reminders": ("Reminders", "Reminders — send a message like:\n\n"
         "remind me in 10 minutes to check the oven\n"

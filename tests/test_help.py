@@ -56,6 +56,7 @@ async def test_help_callback_shows_examples_and_back_without_changing_state(monk
                 assert "months ahead" in text
                 assert "'11pm-1am' or '23:00-01:00'" in text
                 assert "Recurring events check only the first occurrence" in text
+                assert "Change time and Delete this event buttons work for 5 minutes" in text
             if topic != "menu":
                 assert markup == {"inline_keyboard":[[{"text":"Back","callback_data":"help:menu"}]]}
                 assert "\n\n" in text
