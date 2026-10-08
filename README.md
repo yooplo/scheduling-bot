@@ -56,7 +56,9 @@ Change calendar shows your other writable calendars and Cancel. Choose within fi
 
 Send corrections as new messages: editing a previously sent Telegram message does not update an event or pending choice.
 
-Only the latest addition's buttons remain active. A new message dismisses unused buttons. After tapping Change date/time, reply within five minutes; `/cancel` keeps the event unchanged, and a new slash command or explicit add/create/put request replaces the prompt. Buttons and prompts are lost on restart. Invalid answers or failed operations consume the shortcut; inspect your calendar and send a fresh full edit/delete request. Calendar and attached reminder metadata are preserved by these edits.
+Successful Updated replies also renew these three buttons for five minutes, including after Apply anyway. They use the latest event details; recurring-series updates keep the series labels. For an individual recurring occurrence, Change calendar asks for an explicit series request rather than moving the whole series.
+
+Only the latest successful addition, update or calendar move's buttons remain active. A new message dismisses unused buttons. After tapping Change date/time, reply within five minutes; `/cancel` keeps the event unchanged, and a new slash command or explicit add/create/put request replaces the prompt. Buttons and prompts are lost on restart. Invalid answers or failed operations consume the shortcut; inspect your calendar and send a fresh full edit/delete request. Calendar and attached reminder metadata are preserved by these edits.
 
 Free-time results cover the full day, from 12:00 AM through 11:59 PM, and show slots of at least one hour. They include events from every calendar the user can view. New events go to the configured default calendar unless a writable named calendar is explicitly specified.
 

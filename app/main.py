@@ -971,6 +971,11 @@ async def handle_created_callback(chat_id, callback_id, data, telegram, calendar
         await telegram.send_message(chat_id, "Calendar change cancelled. The saved event is unchanged.")
         return
     if action == "calendar":
+        if event.recurring_event_id and not pending.request_text:
+            if pending_actions.get(chat_id) is pending:
+                pending_actions.pop(chat_id, None)
+            await telegram.send_message(chat_id, "Changing calendar for one recurring occurrence is unavailable. Please send an explicit request for the whole series.")
+            return
         try:
             choices = await asyncio.to_thread(calendar.list_calendars)
         except Exception:
@@ -1120,12 +1125,17 @@ async def _edit_event(chat_id: int, text: str, existing: CalendarEvent, settings
 
 
 async def _commit_edit(chat_id, existing, edited, series, telegram, calendar):
+    current_pending = pending_actions.get(chat_id)
     if series:
         updated = await asyncio.to_thread(calendar.update_series, existing, edited)
-        await telegram.send_message(chat_id, _format_series_update_confirmation(updated, edited.recurrence))
-        return
-    updated = await asyncio.to_thread(calendar.update_event, existing, edited)
-    await telegram.send_message(chat_id, _format_update_confirmation(updated))
+        message = _format_series_update_confirmation(updated, edited.recurrence)
+    else:
+        updated = await asyncio.to_thread(calendar.update_event, existing, edited)
+        message = _format_update_confirmation(updated)
+    if pending_actions.get(chat_id) is current_pending:
+        await _send_saved_event(chat_id, updated, series, telegram, message)
+    else:
+        await telegram.send_message(chat_id, message)
 
 
 async def _set_reminder(chat_id: int, text: str, event: CalendarEvent, settings: Settings, telegram: TelegramClient, calendar: CalendarClient, parser: GroqParser) -> None:
@@ -1552,7 +1562,7 @@ HELP_TOPICS = {
         "I ask for missing dates, times, or duration. Tap an event if several match. "
         "Conflicts are checked at the requested date, even months ahead, and offer Add anyway (or Apply anyway for edits) and Cancel. "
         "Recurring events check only the first occurrence. "
-        "After adding, Change date/time, Change calendar and Delete this event buttons work for 5 minutes; date-only replies keep the time and duration. Recurring-event buttons affect the whole series. "
+        "After adding or updating, Change date/time, Change calendar and Delete this event buttons work for 5 minutes; date-only replies keep the time and duration. Recurring-series buttons affect the whole series. "
         "Say 'weekly series' when editing or deleting all occurrences."),
     "reminders": ("Reminders", "Reminders — send a message like:\n\n"
         "remind me in 10 minutes to check the oven\n"

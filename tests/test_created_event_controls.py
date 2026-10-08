@@ -84,7 +84,7 @@ async def test_change_time_edits_saved_event_without_matching_or_creating(flow):
     calendar.create_event.assert_called_once()
     calendar.list_events.assert_not_called()
     parser.match_event.assert_not_called()
-    assert 123 not in main.pending_actions
+    assert main.pending_actions[123].events[0].start.hour == 16
 
 
 @pytest.mark.asyncio
@@ -506,3 +506,94 @@ async def test_edited_telegram_message_does_not_submit_saved_event_change(flow):
     assert main.pending_actions[123] is pending
     parser.parse_edit.assert_not_called()
     calendar.update_event.assert_not_called()
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize('series,conflict', [(False, False), (False, True), (True, False), (True, True)])
+async def test_updated_reply_renews_controls_with_latest_details(flow, series, conflict):
+    create, click, settings, telegram, calendar, parser = flow
+    buttons = await create(series)
+    old_token = main.pending_actions[123].token
+    await click(buttons['Change series date/time' if series else 'Change date/time'])
+    saved = main.pending_actions[123].events[0]
+    if conflict:
+        calendar._list_events_between.return_value = [CalendarEvent(event_id='busy', title='Busy',
+            start=saved.start.replace(hour=16), end=saved.start.replace(hour=18))]
+    await main.handle_message(123, '4pm', settings, telegram, calendar, parser)
+    if conflict:
+        pending = main.pending_event_conflicts[123]
+        await main.handle_conflict_callback(123, 'cb', f'conflict:{pending.token}:add', settings, telegram, calendar)
+    renewed = main.pending_actions[123]
+    assert renewed.token != old_token and renewed.action == 'created'
+    assert renewed.events[0].start.hour == 16 and renewed.events[0].end.hour == 18
+    assert renewed.events[0].calendar_id == saved.calendar_id
+    message = telegram.send_message.call_args.args[1]
+    assert 'Updated' in message and 'within 5 minutes' in message
+    rows = telegram.send_message.call_args.args[2]['inline_keyboard']
+    controls = {b['text']:b['callback_data'] for row in rows for b in row}
+    expected = {'Change series date/time', 'Change series calendar', 'Delete series'} if series else {'Change date/time', 'Change calendar', 'Delete this event'}
+    assert set(controls) == expected
+    await click(buttons['Delete series' if series else 'Delete this event'])
+    assert main.pending_actions[123] is renewed
+    assert not calendar.delete_series.called and not calendar.delete_event.called
+    delete = controls['Delete series' if series else 'Delete this event']
+    await asyncio.gather(click(delete), click(delete))
+    method = calendar.delete_series if series else calendar.delete_event
+    method.assert_called_once_with(renewed.events[0])
+
+
+@pytest.mark.asyncio
+async def test_second_date_change_preserves_updated_time(flow):
+    create, click, settings, telegram, calendar, parser = flow
+    buttons = await create()
+    await click(buttons['Change date/time'])
+    await main.handle_message(123, '4pm', settings, telegram, calendar, parser)
+    updated = main.pending_actions[123].events[0]
+    control = telegram.send_message.call_args.args[2]['inline_keyboard'][0][0]['callback_data']
+    await click(control)
+    await main.handle_message(123, '13 October 2030', settings, telegram, calendar, parser)
+    existing, edited = calendar.update_event.call_args.args
+    assert existing == updated
+    assert edited.start.day == 13 and edited.start.hour == 16 and edited.end.hour == 18
+    assert calendar.update_event.call_count == 2 and calendar.create_event.call_count == 1
+
+
+@pytest.mark.asyncio
+async def test_ordinary_update_completion_keeps_newer_pending_request(flow, monkeypatch):
+    create, _, _, telegram, calendar, _ = flow
+    await create()
+    existing = main.pending_actions.pop(123).events[0]
+    edited = ParsedEdit(title=existing.title, start=existing.start, end=existing.end, confidence='high')
+    original = main.asyncio.to_thread
+    started, finish = asyncio.Event(), asyncio.Event()
+    async def delayed(function, *args):
+        if function == calendar.update_event:
+            started.set()
+            await finish.wait()
+        return await original(function, *args)
+    monkeypatch.setattr(main.asyncio, 'to_thread', delayed)
+    task = asyncio.create_task(main._commit_edit(123, existing, edited, False, telegram, calendar))
+    await started.wait()
+    await create()
+    newer = main.pending_actions[123]
+    finish.set()
+    await task
+    assert main.pending_actions[123] is newer
+    assert len(telegram.send_message.call_args.args) == 2
+
+
+@pytest.mark.asyncio
+async def test_updated_single_occurrence_controls_never_move_whole_series(flow):
+    create, click, _, telegram, calendar, _ = flow
+    await create()
+    existing = main.pending_actions.pop(123).events[0].model_copy(update={'recurring_event_id':'master'})
+    calendar.update_event.side_effect = None
+    calendar.update_event.return_value = existing
+    edited = ParsedEdit(title=existing.title, start=existing.start, end=existing.end, confidence='high')
+    await main._commit_edit(123, existing, edited, False, telegram, calendar)
+    rows = telegram.send_message.call_args.args[2]['inline_keyboard']
+    controls = {b['text']:b['callback_data'] for row in rows for b in row}
+    assert set(controls) == {'Change date/time', 'Change calendar', 'Delete this event'}
+    await click(controls['Change calendar'])
+    calendar.list_calendars.assert_not_called()
+    calendar.move_event.assert_not_called()
+    assert 'one recurring occurrence' in telegram.send_message.call_args.args[1]
