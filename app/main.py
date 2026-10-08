@@ -509,18 +509,18 @@ async def handle_message(chat_id: int, text: str, settings: Settings, telegram: 
         await _show_reminder_status(chat_id, telegram, calendar, cron)
         return
     saved = pending_actions.get(chat_id)
-    if saved and saved.action in {"created", "created_edit", "created_date", "created_calendar", "created_moving"}:
+    if saved and saved.action in {"created", "created_edit", "created_calendar", "created_moving"}:
         pending_actions.pop(chat_id, None)
         if lowered == "cancel" or command == "cancel":
             message = "The calendar change was already submitted. Please check its result." if saved.action == "created_moving" else "Event shortcuts cancelled. The saved event is unchanged."
             await telegram.send_message(chat_id, message)
             return
-        if saved.action in {"created_edit", "created_date"} and not text.lstrip().startswith("/") and not _is_explicit_add_request(lowered):
+        if saved.action == "created_edit" and not text.lstrip().startswith("/") and not _is_explicit_add_request(lowered):
             if saved.expires_at <= time.monotonic():
                 await telegram.send_message(chat_id, "That date/time-change prompt expired. Please send a new edit request.")
                 return
             await _edit_event(chat_id, f"move {saved.request_text or 'this event'} to {text}", saved.events[0], settings, telegram, calendar, parser,
-                              preserve_clock=saved.action == "created_date")
+                              preserve_clock=True)
             return
     conflict = pending_event_conflicts.get(chat_id)
     if conflict:
@@ -936,8 +936,7 @@ async def _send_saved_event(chat_id, created, recurring, telegram, message):
     pending_actions[chat_id] = PendingAction([created], time.monotonic() + PENDING_TTL_SECONDS,
                                            "created", "weekly series" if recurring else "", token)
     buttons = [{"text": label, "callback_data": f"created:{token}:{action}"} for label, action in (
-        ("Change series time" if recurring else "Change time", "change"),
-        ("Change series date" if recurring else "Change date", "date"),
+        ("Change series date/time" if recurring else "Change date/time", "change"),
         ("Change series calendar" if recurring else "Change calendar", "calendar"),
         ("Delete series" if recurring else "Delete this event", "delete"),
     )]
@@ -946,7 +945,7 @@ async def _send_saved_event(chat_id, created, recurring, telegram, message):
 
 
 async def handle_created_callback(chat_id, callback_id, data, telegram, calendar):
-    match = re.fullmatch(r"created:([a-f0-9]{32}):(change|date|delete|calendar|cancel|pick:(\d+))", data)
+    match = re.fullmatch(r"created:([a-f0-9]{32}):(change|delete|calendar|cancel|pick:(\d+))", data)
     pending = pending_actions.get(chat_id)
     action = match.group(2) if match else ""
     expected_state = "created_calendar" if action.startswith("pick:") or action == "cancel" else "created"
@@ -956,8 +955,8 @@ async def handle_created_callback(chat_id, callback_id, data, telegram, calendar
         await telegram.answer_callback_query(callback_id, "These event shortcuts expired or were already used. Please send a new edit/delete request.")
         return
     pending_actions.pop(chat_id, None)
-    if match.group(2) in {"change", "date"}:
-        pending.action = "created_date" if match.group(2) == "date" else "created_edit"
+    if action == "change":
+        pending.action = "created_edit"
         pending.token = uuid4().hex
         pending.expires_at = time.monotonic() + PENDING_TTL_SECONDS
         pending_actions[chat_id] = pending
@@ -1025,8 +1024,8 @@ async def handle_created_callback(chat_id, callback_id, data, telegram, calendar
             await _delete_event(chat_id, event, telegram, calendar)
     else:
         scope = "the whole series" if pending.request_text else "this event"
-        question = "What date should I use" if match.group(2) == "date" else "What date or time should I use"
-        example = "For example, 'Tue' or '13 October'. Date-only replies keep the current time and duration." if match.group(2) == "date" else "For example, 'Tue 20:00-22:00'."
+        question = "What date or time should I use"
+        example = "For example, 'Tue', '4pm' or 'Tue 8-10pm'. Date-only replies keep the current time and duration."
         await telegram.send_message(chat_id, f"{question} for {scope}: {event.title} — {_format_event_range(event)}?\n{example} Reply within 5 minutes, or send /cancel.")
 
 
@@ -1504,7 +1503,7 @@ async def _ask_to_select(chat_id: int, action: str, request_text: str, events: l
 async def handle_selection_callback(chat_id, callback_id, data, settings, telegram, calendar, parser, cron=None):
     match = re.fullmatch(r"select:([a-f0-9]{32}):(cancel|[1-9]\d*)", data)
     pending = pending_actions.get(chat_id)
-    if not match or not pending or pending.action in {"created", "created_edit", "created_date", "created_calendar", "created_moving"} or pending.token != match.group(1) or pending.expires_at <= time.monotonic():
+    if not match or not pending or pending.action in {"created", "created_edit", "created_calendar", "created_moving"} or pending.token != match.group(1) or pending.expires_at <= time.monotonic():
         if pending and pending.expires_at <= time.monotonic():
             pending_actions.pop(chat_id, None)
         await telegram.answer_callback_query(callback_id, "This selection expired or was already used. Please send your request again.")
@@ -1553,7 +1552,7 @@ HELP_TOPICS = {
         "I ask for missing dates, times, or duration. Tap an event if several match. "
         "Conflicts are checked at the requested date, even months ahead, and offer Add anyway (or Apply anyway for edits) and Cancel. "
         "Recurring events check only the first occurrence. "
-        "After adding, Change time, Change date, Change calendar and Delete this event buttons work for 5 minutes; date-only replies keep the time and duration. Recurring-event buttons affect the whole series. "
+        "After adding, Change date/time, Change calendar and Delete this event buttons work for 5 minutes; date-only replies keep the time and duration. Recurring-event buttons affect the whole series. "
         "Say 'weekly series' when editing or deleting all occurrences."),
     "reminders": ("Reminders", "Reminders — send a message like:\n\n"
         "remind me in 10 minutes to check the oven\n"

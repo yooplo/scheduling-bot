@@ -51,7 +51,7 @@ def flow(monkeypatch):
 async def test_created_buttons_delete_exact_calendar_event_once(flow):
     create, click, _, telegram, calendar, parser = flow
     buttons = await create()
-    assert set(buttons) == {"Change time", "Change date", "Change calendar", "Delete this event"}
+    assert set(buttons) == {"Change date/time", "Change calendar", "Delete this event"}
     assert all(len(data.encode()) <= 64 for data in buttons.values())
     saved = main.pending_actions[123].events[0]
     await asyncio.gather(click(buttons["Delete this event"]), click(buttons["Delete this event"]))
@@ -67,10 +67,10 @@ async def test_change_time_edits_saved_event_without_matching_or_creating(flow):
     create, click, settings, telegram, calendar, parser = flow
     buttons = await create()
     saved = main.pending_actions[123].events[0]
-    await click(buttons["Change time"])
+    await click(buttons["Change date/time"])
     assert "Drills" in telegram.send_message.call_args.args[1]
     assert "within 5 minutes" in telegram.send_message.call_args.args[1]
-    await click(buttons["Change time"])
+    await click(buttons["Change date/time"])
     assert main.pending_actions[123].action == "created_edit"
     await main.handle_message(123, "4pm", settings, telegram, calendar, parser)
     existing, edited = calendar.update_event.call_args.args
@@ -91,7 +91,7 @@ async def test_change_time_edits_saved_event_without_matching_or_creating(flow):
 async def test_change_time_retains_edit_conflict_for_apply_anyway(flow):
     create, click, settings, telegram, calendar, _ = flow
     buttons = await create()
-    await click(buttons["Change time"])
+    await click(buttons["Change date/time"])
     saved = main.pending_actions[123].events[0]
     calendar._list_events_between.return_value = [CalendarEvent(
         event_id="busy", title="Meeting", start=saved.start.replace(hour=16), end=saved.end.replace(hour=18),
@@ -107,7 +107,7 @@ async def test_change_time_retains_edit_conflict_for_apply_anyway(flow):
 
 
 @pytest.mark.asyncio
-@pytest.mark.parametrize("control", ["Change time", "Change date"])
+@pytest.mark.parametrize("control", ["Change date/time"])
 @pytest.mark.parametrize("action", ["cancel", "expiry", "new command", "new add", "restart"])
 async def test_time_change_prompt_lifecycle_leaves_saved_event_unchanged(flow, action, control):
     create, click, settings, telegram, calendar, parser = flow
@@ -150,7 +150,7 @@ async def test_stale_created_buttons_cannot_delete_newer_event(flow, action):
 
 
 @pytest.mark.asyncio
-@pytest.mark.parametrize("control", ["Delete this event", "Change date", "Change calendar"])
+@pytest.mark.parametrize("control", ["Delete this event", "Change date/time", "Change calendar"])
 @pytest.mark.parametrize("chat_type,chat_id,sender", [("private", 123, 456), ("private", 789, 789), ("group", -100, 123)])
 async def test_created_callbacks_require_owners_private_chat(flow, chat_type, chat_id, sender, control):
     create, _, _, telegram, calendar, _ = flow
@@ -192,14 +192,14 @@ async def test_selection_callback_cannot_reinterpret_created_token(flow):
 async def test_recurring_shortcuts_clearly_target_whole_series(flow, action):
     create, click, settings, telegram, calendar, parser = flow
     buttons = await create(recurrence=True)
-    assert set(buttons) == {"Change series time", "Change series date", "Change series calendar", "Delete series"}
+    assert set(buttons) == {"Change series date/time", "Change series calendar", "Delete series"}
     assert "whole series" in telegram.send_message.call_args.args[1]
     if action == "delete":
         await click(buttons["Delete series"])
         calendar.delete_series.assert_called_once()
         calendar.delete_event.assert_not_called()
     else:
-        await click(buttons["Change series date"] if action == "date" else buttons["Change series time"])
+        await click(buttons["Change series date/time"])
         await main.handle_message(123, "13 October 2030" if action == "date" else "4pm", settings, telegram, calendar, parser)
         calendar.update_series.assert_called_once()
         calendar.update_event.assert_not_called()
@@ -234,7 +234,7 @@ async def test_failed_create_does_not_publish_buttons_or_pending_choice(flow):
 async def test_invalid_time_answer_consumes_prompt_without_calendar_write(flow):
     create, click, settings, telegram, calendar, parser = flow
     buttons = await create()
-    await click(buttons["Change time"])
+    await click(buttons["Change date/time"])
     await main.handle_message(123, "Mon 10 October 2026 8-10pm", settings, telegram, calendar, parser)
     assert "resend the edit" in telegram.send_message.call_args.args[1]
     calendar.update_event.assert_not_called()
@@ -246,11 +246,11 @@ async def test_invalid_time_answer_consumes_prompt_without_calendar_write(flow):
 async def test_failed_time_edit_consumes_prompt_and_old_buttons_stay_invalid(flow):
     create, click, settings, telegram, calendar, parser = flow
     buttons = await create()
-    await click(buttons["Change time"])
+    await click(buttons["Change date/time"])
     calendar.update_event.side_effect = RuntimeError("calendar unavailable")
     with pytest.raises(RuntimeError, match="calendar unavailable"):
         await main.handle_message(123, "4pm", settings, telegram, calendar, parser)
-    await click(buttons["Change time"])
+    await click(buttons["Change date/time"])
     calendar.update_event.assert_called_once()
     assert 123 not in main.pending_actions
 
@@ -283,11 +283,11 @@ async def test_change_date_preserves_saved_clocks_duration_and_all_day_status(fl
     await main._create_event(123, ParsedEvent(title="Drills", start=start, end=end, all_day=all_day, confidence="high"), telegram, calendar)
     saved = main.pending_actions[123].events[0]
     buttons = {button["text"]: button["callback_data"] for row in telegram.send_message.call_args.args[2]["inline_keyboard"] for button in row}
-    await click(buttons["Change date"])
-    assert "What date should I use" in telegram.send_message.call_args.args[1]
+    await click(buttons["Change date/time"])
+    assert "What date or time should I use" in telegram.send_message.call_args.args[1]
     assert "keep the current time and duration" in telegram.send_message.call_args.args[1]
-    await click(buttons["Change date"])
-    assert main.pending_actions[123].action == "created_date"
+    await click(buttons["Change date/time"])
+    assert main.pending_actions[123].action == "created_edit"
     parser.parse_edit.side_effect = None
     parser.parse_edit.return_value = ParsedEdit(title="Drills", start="2030-10-14T14:00:00+08:00",
                                               end="2030-10-14T15:00:00+08:00", confidence="high", all_day=False)
@@ -306,7 +306,7 @@ async def test_change_date_preserves_saved_clocks_duration_and_all_day_status(fl
 async def test_change_date_accepts_explicit_time_range_and_checks_new_interval(flow):
     create, click, settings, telegram, calendar, parser = flow
     buttons = await create()
-    await click(buttons["Change date"])
+    await click(buttons["Change date/time"])
     await main.handle_message(123, "13 October 2030 9-11am", settings, telegram, calendar, parser)
     edited = calendar.update_event.call_args.args[1]
     assert edited.start.isoformat() == "2030-10-13T09:00:00+08:00"
@@ -318,7 +318,7 @@ async def test_change_date_accepts_explicit_time_range_and_checks_new_interval(f
 async def test_change_date_conflict_waits_for_confirmation_without_duplicate_event(flow):
     create, click, settings, telegram, calendar, parser = flow
     buttons = await create()
-    await click(buttons["Change date"])
+    await click(buttons["Change date/time"])
     calendar._list_events_between.return_value = [CalendarEvent(event_id="busy", title="Busy",
         start="2030-10-13T20:00:00+08:00", end="2030-10-13T22:00:00+08:00")]
     await main.handle_message(123, "13 October 2030", settings, telegram, calendar, parser)
