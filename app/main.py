@@ -515,7 +515,7 @@ async def handle_message(chat_id: int, text: str, settings: Settings, telegram: 
             message = "The calendar change was already submitted. Please check its result." if saved.action == "created_moving" else "Event shortcuts cancelled. The saved event is unchanged."
             await telegram.send_message(chat_id, message)
             return
-        if saved.action == "created_edit" and not text.lstrip().startswith("/") and not _is_explicit_add_request(lowered):
+        if saved.action == "created_edit" and not text.lstrip().startswith("/") and not _is_explicit_add_request(lowered) and not _is_standalone_reminder_request(lowered):
             if saved.expires_at <= time.monotonic():
                 await telegram.send_message(chat_id, "That date/time-change prompt expired. Please send a new edit request.")
                 return
@@ -535,7 +535,7 @@ async def handle_message(chat_id: int, text: str, settings: Settings, telegram: 
             pending_event_drafts.pop(chat_id, None)
             await telegram.send_message(chat_id, "Event creation cancelled.")
             return
-        if text.lstrip().startswith("/") or _is_explicit_add_request(lowered):
+        if text.lstrip().startswith("/") or _is_explicit_add_request(lowered) or _is_standalone_reminder_request(lowered):
             pending_event_drafts.pop(chat_id, None)
         elif draft.expires_at <= time.monotonic():
             pending_event_drafts.pop(chat_id, None)

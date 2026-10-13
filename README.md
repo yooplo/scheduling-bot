@@ -74,7 +74,7 @@ calendars - Shows the list of calendars
 now - Tells you the date and time now
 ```
 
-Reminder wording determines whether a notification is independent or event-linked:
+Reminder wording determines whether a notification is independent or event-linked. A new independent reminder dismisses an unfinished event-creation or Change date/time prompt; it never needs an event duration:
 
 - `remind me tmr at around 12pm to collect shopee parcel at j9` schedules an independent reminder for tomorrow at noon in the home timezone. `set a reminder tmr at 12pm to ...` works too. Past reminder times are rejected; send a future date and time.
 
