@@ -40,8 +40,12 @@ def flow(monkeypatch):
         return {button["text"]: button["callback_data"]
                 for row in telegram.send_message.call_args.args[2]["inline_keyboard"] for button in row}
 
-    async def click(data):
+    async def click(data, *, confirm_deletion=True):
         await main.handle_created_callback(123, "cb", data, telegram, calendar)
+        pending = main.pending_actions.get(123)
+        if confirm_deletion and pending and pending.action == "delete_confirm":
+            confirm = telegram.send_message.call_args.args[2]["inline_keyboard"][0][0]["callback_data"]
+            await main.handle_delete_callback(123, "confirm", confirm, telegram, calendar)
 
     monkeypatch.setattr(main, "dependencies", lambda: (settings, telegram, {123: calendar, 456: Mock()}, parser, None))
     return create, click, settings, telegram, calendar, parser
@@ -55,11 +59,11 @@ async def test_created_buttons_delete_exact_calendar_event_once(flow):
     assert all(len(data.encode()) <= 64 for data in buttons.values())
     saved = main.pending_actions[123].events[0]
     await asyncio.gather(click(buttons["Delete this event"]), click(buttons["Delete this event"]))
-    calendar.delete_event.assert_called_once_with(saved)
+    calendar.delete_event_with_undo.assert_called_once_with(saved)
     assert saved.event_id == "created-1" and saved.calendar_id == "work"
     calendar.create_event.assert_called_once()
     parser.match_event.assert_not_called()
-    assert 123 not in main.pending_actions
+    assert main.pending_actions[123].action == "undo_delete"
 
 
 @pytest.mark.asyncio
@@ -166,13 +170,17 @@ async def test_created_callbacks_require_owners_private_chat(flow, chat_type, ch
 
 @pytest.mark.asyncio
 async def test_created_callback_dispatches_from_authorized_webhook(flow):
-    create, _, _, _, calendar, _ = flow
+    create, _, _, telegram, calendar, _ = flow
     buttons = await create()
     request = AsyncMock()
     request.json.return_value = {"callback_query": {"id": "cb", "data": buttons["Delete this event"],
         "from": {"id": 123}, "message": {"chat": {"id": 123, "type": "private"}}}}
     await main.webhook(request, "secret")
-    calendar.delete_event.assert_called_once()
+    assert main.pending_actions[123].action == "delete_confirm"
+    calendar.delete_event_with_undo.assert_not_called()
+    confirm = telegram.send_message.call_args.args[2]["inline_keyboard"][0][0]["callback_data"]
+    await main.handle_delete_callback(123, "confirm", confirm, telegram, calendar)
+    calendar.delete_event_with_undo.assert_called_once()
 
 
 @pytest.mark.asyncio
@@ -184,7 +192,7 @@ async def test_selection_callback_cannot_reinterpret_created_token(flow):
     assert main.pending_actions[123].action == "created"
     calendar.set_reminder.assert_not_called()
     await click(buttons["Delete this event"])
-    calendar.delete_event.assert_called_once()
+    calendar.delete_event_with_undo.assert_called_once()
 
 
 @pytest.mark.asyncio
@@ -212,11 +220,11 @@ async def test_recurring_shortcuts_clearly_target_whole_series(flow, action):
 async def test_failed_delete_consumes_shortcut_and_requires_new_request(flow):
     create, click, _, _, calendar, _ = flow
     buttons = await create()
-    calendar.delete_event.side_effect = RuntimeError("permission denied")
+    calendar.delete_event_with_undo.side_effect = RuntimeError("permission denied")
     with pytest.raises(RuntimeError, match="permission denied"):
         await click(buttons["Delete this event"])
     await click(buttons["Delete this event"])
-    calendar.delete_event.assert_called_once()
+    calendar.delete_event_with_undo.assert_called_once()
     assert 123 not in main.pending_actions
 
 
@@ -352,7 +360,7 @@ async def test_change_calendar_moves_once_and_renews_correct_target(flow, recurr
     assert main.pending_actions[123].events[0].calendar_id == 'personal'
     delete = telegram.send_message.call_args.args[2]['inline_keyboard'][-1][-1]['callback_data']
     await click(delete)
-    method = calendar.delete_series if recurring else calendar.delete_event
+    method = calendar.delete_series if recurring else calendar.delete_event_with_undo
     assert method.call_args.args[0].calendar_id == 'personal'
 
 
@@ -532,12 +540,16 @@ async def test_updated_reply_renews_controls_with_latest_details(flow, series, c
     controls = {b['text']:b['callback_data'] for row in rows for b in row}
     expected = {'Change series date/time', 'Change series calendar', 'Delete series'} if series else {'Change date/time', 'Change calendar', 'Delete this event'}
     assert set(controls) == expected
-    await click(buttons['Delete series' if series else 'Delete this event'])
-    assert main.pending_actions[123] is renewed
-    assert not calendar.delete_series.called and not calendar.delete_event.called
     delete = controls['Delete series' if series else 'Delete this event']
-    await asyncio.gather(click(delete), click(delete))
-    method = calendar.delete_series if series else calendar.delete_event
+    await click(delete, confirm_deletion=False)
+    assert main.pending_actions[123].action == 'delete_confirm'
+    assert not calendar.delete_series.called and not calendar.delete_event_with_undo.called
+    confirm = telegram.send_message.call_args.args[2]['inline_keyboard'][0][0]['callback_data']
+    await asyncio.gather(
+        main.handle_delete_callback(123, 'confirm', confirm, telegram, calendar),
+        main.handle_delete_callback(123, 'confirm', confirm, telegram, calendar),
+    )
+    method = calendar.delete_series if series else calendar.delete_event_with_undo
     method.assert_called_once_with(renewed.events[0])
 
 

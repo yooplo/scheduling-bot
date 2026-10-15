@@ -23,7 +23,7 @@ Deterministic routing handles commands, common reminder forms, calendar manageme
 **Non-goals (v1)**
 - Open registration, dynamic account linking, or more than two configured users
 - Voice message input
-- Attendee invitations, arbitrary recurrence rules, and general undo (the latest addition has five-minute change/delete shortcuts)
+- Attendee invitations, arbitrary recurrence rules, and general undo (only a recently deleted one-off event can be restored with a five-minute bot shortcut)
 
 ## 3. Architecture
 
@@ -162,10 +162,15 @@ days) from Google Calendar, then asks Groq to pick the best match:
 }
 ```
 
-- If `ambiguous: true` or no confident match, the bot replies with a
-  candidate buttons and waits for the user to pick one (typed numbers remain supported)
+- If `ambiguous: true` or no confident match, the bot replies with
+  candidate-selection buttons and waits for the user to pick one (typed
+  numbers remain supported)
   (simple in-memory pending-action state keyed by chat ID, with a
   short TTL).
+- A direct match or a selected candidate is not deleted immediately: the bot
+  asks for a separate confirmation. A confirmed one-off deletion offers a
+  five-minute Undo; recurring occurrences and whole-series deletions are not
+  undoable by the bot. See §8.3 for pending-state and failure behavior.
 
 ### 6.3 Telegram outgoing messages
 
@@ -189,7 +194,7 @@ The menu also mentions `/now`. Examples cover all-day and recurring events,
 event selection and conflict choices, independent/event reminders and status,
 free-time queries, and calendar management. Events help includes `Add Drills at TSA@JK on Monday 8-10pm` and `move Drills to Tue 20:00-22:00`, explains weekday abbreviations, 24-hour and explicit overnight ranges, date/weekday clarification and conflict checks months ahead. It states that recurring events check only the first occurrence. Weekdays use the next matching day, including today; `next Monday` requested on Monday means one week later. `/start` advertises `/help`.
 Help does not call Groq or perform calendar/reminder operations.
-Events help also advertises the five-minute Change date/time/Change calendar/Delete this event shortcuts on successful additions and updates and says that recurring-event shortcuts affect the whole series.
+Events help also advertises the five-minute Change date/time/Change calendar/Delete this event shortcuts on successful additions and updates and says that recurring-event shortcuts affect the whole series. Deletion requires an additional confirmation. Undo is available for five minutes after deleting a one-off event, but not after deleting a recurring occurrence or series.
 
 In the configured group, `/help` shows only read-only schedule examples and
 buttons for configured users, reusing the existing user/date selection flow.
@@ -370,8 +375,19 @@ private chat. Old, expired, or already-used buttons cannot execute an action or
 select from a newer prompt. Consume a valid selection before external calls to
 prevent repeated taps from executing the action twice. `/start` and new messages
 that are not selections discard the pending action. Callbacks require the
-configured user's own private chat. No extra confirmation is added to actions
-that previously executed after selecting an event.
+configured user's own private chat. Event and series deletion now requires a
+separate confirmation after a direct match or candidate selection.
+
+Confirmation and undo buttons are private-chat, token- and expiry-bound,
+consumed before external writes, and invalidated by a later message,
+replacement request, or restart. Confirming a one-off event deletion offers an
+Undo button for five minutes. Undo recreates the event from its saved Google
+Calendar resource, preserving available event metadata and reminders; Google
+may assign it a new event ID. A recurring occurrence can be deleted only after
+confirmation and has no undo. Deleting a whole recurring series also requires
+confirmation and cannot be undone by the bot. Calendar deletion and reminder
+removal are unchanged. A failed or ambiguous Calendar API write requires the
+user to inspect Google Calendar before retrying.
 
 Example: `move Dentist to 4pm` with two matching appointments displays a
 button for each date. Tapping the intended appointment applies the original
@@ -384,9 +400,24 @@ selection compatibility, and private-chat webhook authorization.
 1. Detect "delete" intent
 2. Call `calendar_client.list_events(days_ahead=30)`
 3. Call `parser.match_event(message, candidate_events)`
-4. If single confident match → delete immediately, confirm
+4. For a direct exact-title or non-ambiguous match, ask the user to confirm
+   the specific event before deleting it.
 5. If ambiguous → reply with candidate buttons, store pending state
    `{chat_id: [event_ids]}` with a 5-minute TTL
+6. After the user selects a candidate, ask for a separate confirmation.
+   Explicit recurring-series requests identify the whole series in the
+   confirmation. A typed or button confirmation is consumed before the
+   Calendar write; cancel, expiry, another message, replacement, or restart
+   prevents the deletion.
+7. After confirming a one-off event deletion, retain the Google event
+   resource in process memory and offer Undo for five minutes. Undo reinserts
+   the resource and may yield a new event ID. Recurring occurrences and series
+   have no undo. A repeated or stale confirmation or undo button cannot write
+   twice.
+
+The undo snapshot is short-lived, per-chat in-memory state and is lost on
+restart. Undo covers one-off events only; it does not cover recurring events
+or series, calendar deletion, or reminder removal.
 6. On next message, if pending state exists and message looks like a
    selection (digit or ordinal), resolve and delete; otherwise clear
    pending state and treat as a new message
@@ -556,8 +587,9 @@ unconfirmed. This change removes the single-attempt failure mode.
       event on the real Google Calendar
 - [x] Sending "list" / "what's on my calendar" returns accurate upcoming
       events
-- [x] Sending a delete phrase removes the correct event, with
-      disambiguation when multiple events could match
+- [x] Sending a delete phrase identifies the correct event, with
+      disambiguation when needed, then requires confirmation before deletion;
+      confirmed one-off deletions offer a five-minute Undo
 - [x] Sending an edit phrase updates the correct event, with
       disambiguation when multiple events could match
 - [x] Recurring events, both reminder types, combined reminder listings, conflict warnings, named calendars, and free-time queries work as documented
@@ -572,7 +604,7 @@ unconfirmed. This change removes the single-attempt failure mode.
 ## 14. Current Operational Constraints
 
 - Upcoming event lists use a 7-day window; matching, reminder management, and event-linked reminder listings use 30-day windows. Add/edit conflicts query the requested interval; recurring changes check only the displayed/first occurrence.
-- Pending event choices (including saved-event shortcuts and their date/time-change prompts), event-creation drafts, conflict choices, calendar-deletion confirmations, and recently displayed reminder lists are held in memory for five minutes and are lost on a restart.
+- Pending event choices (including saved-event shortcuts and their date/time-change prompts), event-deletion confirmations and one-off undo snapshots, event-creation drafts, conflict choices, calendar-deletion confirmations, and recently displayed reminder lists are held in memory for five minutes and are lost on a restart.
 - Google API requests use an independent authorized HTTP transport per request because the underlying `httplib2` transport is not thread-safe. Dependency initialization is published atomically so a failed OAuth/client initialization cannot leave partial global state.
 - Independent reminder persistence depends on the cron-job.org REST API and its account quotas (normally 100 API requests per day). Without both `CRON_JOB_API_KEY` and `SERVICE_BASE_URL`, independent reminder creation is disabled while calendar features remain available.
 - Delivery depends on cron-job.org reaching the sleeping Render service; the first request after idle may be delayed.

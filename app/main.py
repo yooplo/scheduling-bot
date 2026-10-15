@@ -49,6 +49,8 @@ class PendingAction:
     request_text: str
     token: str = ""
     calendars: list[CalendarInfo] = field(default_factory=list)
+    series: bool = False
+    deleted_resource: dict[str, object] | None = None
 
 
 @dataclass
@@ -144,7 +146,7 @@ async def webhook(request: Request, x_telegram_bot_api_secret_token: str | None 
     if callback:
         chat_id = callback.get("message", {}).get("chat", {}).get("id")
         sender_id = callback.get("from", {}).get("id")
-        if callback.get("data", "").startswith(("conflict:", "select:", "help:", "created:")):
+        if callback.get("data", "").startswith(("conflict:", "select:", "help:", "created:", "delete:")):
             if callback.get("message", {}).get("chat", {}).get("type") != "private" or chat_id != sender_id or sender_id not in calendars:
                 await telegram.answer_callback_query(callback.get("id", ""), "Not available here.")
                 return {"ok": True}
@@ -158,6 +160,8 @@ async def webhook(request: Request, x_telegram_bot_api_secret_token: str | None 
                     await handle_selection_callback(chat_id, callback.get("id", ""), callback["data"], settings, telegram, calendars[sender_id], parser, cron)
                 elif callback["data"].startswith("created:"):
                     await handle_created_callback(chat_id, callback.get("id", ""), callback["data"], telegram, calendars[sender_id])
+                elif callback["data"].startswith("delete:"):
+                    await handle_delete_callback(chat_id, callback.get("id", ""), callback["data"], telegram, calendars[sender_id])
                 else:
                     await handle_conflict_callback(chat_id, callback.get("id", ""), callback["data"], settings, telegram, calendars[sender_id])
             except Exception:
@@ -522,6 +526,8 @@ async def handle_message(chat_id: int, text: str, settings: Settings, telegram: 
             await _edit_event(chat_id, f"move {saved.request_text or 'this event'} to {text}", saved.events[0], settings, telegram, calendar, parser,
                               preserve_clock=True)
             return
+    elif saved and saved.action == "undo_delete" and lowered != "undo":
+        pending_actions.pop(chat_id, None)
     conflict = pending_event_conflicts.get(chat_id)
     if conflict:
         choice = {"add anyway": "add", "apply anyway": "add", "change time": "change", "cancel": "cancel", "/cancel": "cancel"}.get(lowered)
@@ -623,7 +629,33 @@ async def handle_message(chat_id: int, text: str, settings: Settings, telegram: 
         return
 
     pending = pending_actions.get(chat_id)
-    if pending and pending.expires_at > time.monotonic():
+    if pending and pending.action in {"delete_confirm", "undo_delete"}:
+        if pending.expires_at <= time.monotonic():
+            pending_actions.pop(chat_id, None)
+            if lowered in {"cancel", "/cancel"} or command == "cancel":
+                await telegram.send_message(chat_id, "That deletion choice expired. Nothing else was changed.")
+                return
+            if pending.action == "delete_confirm" and lowered in {"confirm delete", "confirm deletion"}:
+                await telegram.send_message(chat_id, "That deletion confirmation expired. Please send a new delete request.")
+                return
+            if pending.action == "undo_delete" and lowered == "undo":
+                await telegram.send_message(chat_id, "That Undo option expired. Please check Google Calendar.")
+                return
+        elif pending.action == "delete_confirm" and (lowered in {"cancel", "/cancel"} or command == "cancel"):
+            pending_actions.pop(chat_id, None)
+            await telegram.send_message(chat_id, "Event deletion cancelled.")
+            return
+        elif pending.action == "delete_confirm" and lowered in {"confirm delete", "confirm deletion"}:
+            pending_actions.pop(chat_id, None)
+            await _complete_event_deletion(chat_id, pending, telegram, calendar)
+            return
+        elif pending.action == "undo_delete" and lowered == "undo":
+            pending_actions.pop(chat_id, None)
+            await _restore_deleted_event(chat_id, pending, telegram, calendar)
+            return
+        else:
+            pending_actions.pop(chat_id, None)
+    elif pending and pending.expires_at > time.monotonic():
         if lowered == "cancel" or command == "cancel":
             pending_actions.pop(chat_id, None)
             await telegram.send_message(chat_id, "Selection cancelled.")
@@ -754,18 +786,21 @@ async def handle_message(chat_id: int, text: str, settings: Settings, telegram: 
         if ("weekly" in lowered or "recurring" in lowered) and (series_matches := [event for event in events if event.title.lower() in lowered and event.recurring_event_id]):
             unique_series = {event.recurring_event_id for event in series_matches}
             if len(unique_series) == 1:
-                await asyncio.to_thread(calendar.delete_series, series_matches[0])
-                await telegram.send_message(chat_id, f"✅ Deleted recurring series: {series_matches[0].title}")
+                await _ask_delete_confirmation(chat_id, series_matches[0], telegram, series=True)
                 return
         exact_matches = [event for event in events if event.title.casefold() in lowered.casefold()]
         if len(exact_matches) == 1:
-            await _delete_event(chat_id, exact_matches[0], telegram, calendar)
+            await _ask_delete_confirmation(
+                chat_id, exact_matches[0], telegram,
+                series=_is_explicit_series_delete(text, exact_matches[0]),
+            )
             return
         match = await asyncio.to_thread(parser.match_event, text, events)
         selected = next((e for e in events if e.event_id == match.matched_event_id), None)
         if selected and not match.ambiguous:
-            await asyncio.to_thread(calendar.delete_event, selected)
-            await telegram.send_message(chat_id, f"✅ Deleted: {selected.title} — {_format_time(selected.start)}")
+            await _ask_delete_confirmation(
+                chat_id, selected, telegram, series=_is_explicit_series_delete(text, selected),
+            )
             return
         await _ask_to_select(chat_id, "delete", text, events, match, telegram)
     elif _is_existing_reminder_request(lowered):
@@ -1022,11 +1057,7 @@ async def handle_created_callback(chat_id, callback_id, data, telegram, calendar
             await telegram.send_message(chat_id, message)
         return
     if match.group(2) == "delete":
-        if pending.request_text:
-            await asyncio.to_thread(calendar.delete_series, event)
-            await telegram.send_message(chat_id, f"✅ Deleted recurring series: {event.title}")
-        else:
-            await _delete_event(chat_id, event, telegram, calendar)
+        await _ask_delete_confirmation(chat_id, event, telegram, series=bool(pending.request_text))
     else:
         scope = "the whole series" if pending.request_text else "this event"
         question = "What date or time should I use"
@@ -1039,9 +1070,109 @@ async def _ask_event_detail(chat_id, text, question, now, telegram):
     await telegram.send_message(chat_id, f"{question}\nReply within 5 minutes, or send /cancel.")
 
 
-async def _delete_event(chat_id: int, event: CalendarEvent, telegram: TelegramClient, calendar: CalendarClient) -> None:
-    await asyncio.to_thread(calendar.delete_event, event)
-    await telegram.send_message(chat_id, f"✅ Deleted: {event.title} — {_format_time(event.start)}")
+def _is_explicit_series_delete(text: str, event: CalendarEvent) -> bool:
+    if not event.recurring_event_id:
+        return False
+    lowered = text.casefold()
+    return (
+        any(term in lowered for term in ("weekly", "recurring", "series", "every "))
+        or ("all" in lowered and any(term in lowered for term in ("session", "occurrence")))
+    )
+
+
+async def _ask_delete_confirmation(
+    chat_id: int, event: CalendarEvent, telegram: TelegramClient, *, series: bool = False,
+) -> None:
+    token = uuid4().hex
+    pending_actions[chat_id] = PendingAction(
+        [event], time.monotonic() + PENDING_TTL_SECONDS, "delete_confirm", "",
+        token, series=series,
+    )
+    target = "the entire recurring series" if series else "this event"
+    undo_note = (
+        "This deletion cannot be undone by the bot."
+        if series or event.recurring_event_id
+        else "You can undo this deletion for 5 minutes."
+    )
+    await telegram.send_message(
+        chat_id,
+        f"⚠️ Delete {target}?\n{event.title} — {_format_event_range(event)}"
+        f"{f' · {event.calendar_name}' if event.calendar_name else ''}\n{undo_note}",
+        {"inline_keyboard": [[
+            {"text": "Confirm deletion", "callback_data": f"delete:{token}:confirm"},
+            {"text": "Cancel", "callback_data": f"delete:{token}:cancel"},
+        ]]},
+    )
+
+
+async def _complete_event_deletion(chat_id: int, pending: PendingAction, telegram, calendar) -> None:
+    event = pending.events[0]
+    if pending.series:
+        await asyncio.to_thread(calendar.delete_series, event)
+        await telegram.send_message(chat_id, f"✅ Deleted recurring series: {event.title}. This cannot be undone by the bot.")
+        return
+    if event.recurring_event_id:
+        await asyncio.to_thread(calendar.delete_event, event)
+        await telegram.send_message(chat_id, f"✅ Deleted recurring occurrence: {event.title} — {_format_time(event.start)}. This cannot be undone by the bot.")
+        return
+    resource = await asyncio.to_thread(calendar.delete_event_with_undo, event)
+    if chat_id in pending_actions:
+        await telegram.send_message(
+            chat_id, f"✅ Deleted: {event.title} — {_format_time(event.start)}",
+        )
+        return
+    token = uuid4().hex
+    pending_actions[chat_id] = PendingAction(
+        [event], time.monotonic() + PENDING_TTL_SECONDS, "undo_delete", "",
+        token, deleted_resource=resource,
+    )
+    await telegram.send_message(
+        chat_id, f"✅ Deleted: {event.title} — {_format_time(event.start)}",
+        {"inline_keyboard": [[{
+            "text": "Undo", "callback_data": f"delete:{token}:undo",
+        }]]},
+    )
+
+
+async def _restore_deleted_event(chat_id: int, pending: PendingAction, telegram, calendar) -> None:
+    event = pending.events[0]
+    if pending.deleted_resource is None:
+        await telegram.send_message(chat_id, "I no longer have the deleted event details needed to restore it. Please check Google Calendar.")
+        return
+    restored = await asyncio.to_thread(
+        calendar.restore_deleted_event,
+        pending.deleted_resource,
+        event.calendar_id,
+        event.calendar_name,
+    )
+    await telegram.send_message(
+        chat_id,
+        f"↩️ Restored: {restored.title} — {_format_event_range(restored)}"
+        f"{f' · {restored.calendar_name}' if restored.calendar_name else ''}",
+    )
+
+
+async def handle_delete_callback(chat_id, callback_id, data, telegram, calendar) -> None:
+    match = re.fullmatch(r"delete:([a-f0-9]{32}):(confirm|cancel|undo)", data)
+    pending = pending_actions.get(chat_id)
+    action = match.group(2) if match else ""
+    expected_action = "undo_delete" if action == "undo" else "delete_confirm"
+    if (
+        not match or not pending or pending.action != expected_action
+        or pending.token != match.group(1) or pending.expires_at <= time.monotonic()
+    ):
+        if pending and pending.expires_at <= time.monotonic():
+            pending_actions.pop(chat_id, None)
+        await telegram.answer_callback_query(callback_id, "This deletion choice expired or was already used.")
+        return
+    pending_actions.pop(chat_id, None)
+    await telegram.answer_callback_query(callback_id)
+    if action == "cancel":
+        await telegram.send_message(chat_id, "Event deletion cancelled.")
+    elif action == "undo":
+        await _restore_deleted_event(chat_id, pending, telegram, calendar)
+    else:
+        await _complete_event_deletion(chat_id, pending, telegram, calendar)
 
 
 async def _remove_scheduled_reminder(reminder: ScheduledReminder, calendar: CalendarClient, cron: CronJobClient | None) -> None:
@@ -1481,7 +1612,10 @@ def _upcoming_weekday_from_text(text: str, settings: Settings):
 
 async def _execute_selection(chat_id, pending, selected, settings, telegram, calendar, parser, cron):
     if pending.action == "delete":
-        await _delete_event(chat_id, selected, telegram, calendar)
+        await _ask_delete_confirmation(
+            chat_id, selected, telegram,
+            series=_is_explicit_series_delete(pending.request_text, selected),
+        )
     elif pending.action == "edit":
         await _edit_event(chat_id, pending.request_text, selected, settings, telegram, calendar, parser)
     elif pending.action == "clear_reminder":
@@ -1513,7 +1647,10 @@ async def _ask_to_select(chat_id: int, action: str, request_text: str, events: l
 async def handle_selection_callback(chat_id, callback_id, data, settings, telegram, calendar, parser, cron=None):
     match = re.fullmatch(r"select:([a-f0-9]{32}):(cancel|[1-9]\d*)", data)
     pending = pending_actions.get(chat_id)
-    if not match or not pending or pending.action in {"created", "created_edit", "created_calendar", "created_moving"} or pending.token != match.group(1) or pending.expires_at <= time.monotonic():
+    if not match or not pending or pending.action in {
+        "created", "created_edit", "created_calendar", "created_moving",
+        "delete_confirm", "undo_delete",
+    } or pending.token != match.group(1) or pending.expires_at <= time.monotonic():
         if pending and pending.expires_at <= time.monotonic():
             pending_actions.pop(chat_id, None)
         await telegram.answer_callback_query(callback_id, "This selection expired or was already used. Please send your request again.")
@@ -1560,6 +1697,7 @@ HELP_TOPICS = {
         "Mon–Sun abbreviations and 24-hour ranges work too. If a weekday and date disagree, I ask which date to use. "
         "For overnight ranges, use '11pm-1am' or '23:00-01:00'. "
         "I ask for missing dates, times, or duration. Tap an event if several match. "
+        "Every event or series deletion asks for confirmation; one-off event deletions can be undone for 5 minutes. "
         "Conflicts are checked at the requested date, even months ahead, and offer Add anyway (or Apply anyway for edits) and Cancel. "
         "Recurring events check only the first occurrence. "
         "After adding or updating, Change date/time, Change calendar and Delete this event buttons work for 5 minutes; date-only replies keep the time and duration. Recurring-series buttons affect the whole series. "

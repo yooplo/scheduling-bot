@@ -11,7 +11,9 @@ from app.models import CalendarEvent
 @pytest.fixture
 def selection():
     telegram, calendar, parser = AsyncMock(), Mock(), Mock()
-    events = [CalendarEvent(event_id=str(i), title="Dentist", start=f"2030-09-{12+i}T14:00:00+08:00", calendar_name="Work") for i in (1, 2)]
+    events = [CalendarEvent(event_id=str(i), title="Dentist", start=f"2030-09-{12+i}T14:00:00+08:00", calendar_id="work", calendar_name="Work") for i in (1, 2)]
+    calendar.delete_event_with_undo.return_value = {"id": "deleted-event"}
+    calendar.restore_deleted_event.return_value = events[1]
 
     async def prompt(action="delete"):
         await main._ask_to_select(123, action, "original request", events, SimpleNamespace(candidates=[]), telegram)
@@ -33,8 +35,19 @@ async def test_buttons_identify_events_and_delete_selected_once(selection):
     assert buttons[-1][0]["text"] == "Cancel"
     assert all(len(row[0]["callback_data"].encode()) <= 64 for row in buttons)
     data = buttons[1][0]["callback_data"]
-    await asyncio.gather(click(data), click(data))
-    calendar.delete_event.assert_called_once_with(events[1])
+    await click(data)
+    assert calendar.delete_event_with_undo.call_count == 0
+    assert main.pending_actions[123].action == "delete_confirm"
+    confirm = telegram.send_message.call_args.args[2]["inline_keyboard"][0][0]["callback_data"]
+    await asyncio.gather(
+        main.handle_delete_callback(123, "cb", confirm, telegram, calendar),
+        main.handle_delete_callback(123, "cb", confirm, telegram, calendar),
+    )
+    calendar.delete_event_with_undo.assert_called_once_with(events[1])
+    assert main.pending_actions[123].action == "undo_delete"
+    undo = telegram.send_message.call_args.args[2]["inline_keyboard"][0][0]["callback_data"]
+    await main.handle_delete_callback(123, "cb", undo, telegram, calendar)
+    calendar.restore_deleted_event.assert_called_once_with({"id": "deleted-event"}, "work", "Work")
     assert 123 not in main.pending_actions
 
 
@@ -89,7 +102,8 @@ async def test_typed_selection_still_works(selection, reply):
     prompt, _, telegram, calendar, parser, events = selection
     await prompt()
     await main.handle_message(123, reply, SimpleNamespace(), telegram, calendar, parser)
-    calendar.delete_event.assert_called_once_with(events[1])
+    assert main.pending_actions[123].action == "delete_confirm"
+    calendar.delete_event_with_undo.assert_not_called()
 
 
 def test_new_request_with_number_is_not_a_selection():
@@ -110,4 +124,6 @@ async def test_webhook_selection_requires_owners_private_chat(selection, monkeyp
         "message": {"chat": {"id": 123, "type": chat_type}},
     }}
     await main.webhook(request, "secret")
-    assert calendar.delete_event.call_count == int(allowed)
+    calendar.delete_event_with_undo.assert_not_called()
+    if allowed:
+        assert main.pending_actions[123].action == "delete_confirm"

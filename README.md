@@ -50,7 +50,7 @@ When adding an event in private chat, the bot remembers incomplete requests and 
 
 New-event conflict checks cover the event's requested interval across accessible calendars, even months ahead, including all-day and overnight events. A calendar read failure prevents creation. Recurring additions check their first occurrence rather than every future occurrence.
 
-After adding an event, the success reply names the actual calendar and offers **Change date/time**, **Change calendar** and **Delete this event** for five minutes. Change date/time asks for a new date/time, then edits that saved event without creating another or searching by title; `4pm` keeps its duration, while `Tue 20:00-22:00` changes its day and range. The same button accepts a date such as `Tue`, `Tues` or `13 October 2030`; a date-only reply keeps the event's time, duration, overnight span and all-day status. You can include a new time range to change both. Overlaps offer Apply anyway/Cancel. Delete this event removes the saved event immediately. Recurring additions instead offer **Change series date/time**, **Change series calendar** and **Delete series**, which affect the whole series.
+After adding an event, the success reply names the actual calendar and offers **Change date/time**, **Change calendar** and **Delete this event** for five minutes. Change date/time asks for a new date/time, then edits that saved event without creating another or searching by title; `4pm` keeps its duration, while `Tue 20:00-22:00` changes its day and range. The same button accepts a date such as `Tue`, `Tues` or `13 October 2030`; a date-only reply keeps the event's time, duration, overnight span and all-day status. You can include a new time range to change both. Overlaps offer Apply anyway/Cancel. Delete this event asks for confirmation; after a successful one-off deletion, tap **Undo** within five minutes to restore it. Recurring additions instead offer **Change series date/time**, **Change series calendar** and **Delete series**, which affect the whole series; series deletion also requires confirmation and cannot be undone by the bot.
 
 Change calendar shows your other writable calendars and Cancel. Choose within five minutes to move the saved event (or whole series), keeping its dates, details and reminders. The moved reply names the destination and offers fresh shortcuts. Permissions are checked again before moving; if a move or reminder restoration fails, inspect your calendars before retrying.
 
@@ -90,7 +90,7 @@ Reminder wording determines whether a notification is independent or event-linke
 ## Current limitations
 
 - One or two preconfigured Telegram/Google accounts only. Each account can access and manage multiple calendars; adding users or changing linked accounts dynamically requires a database and web OAuth flow.
-- No voice-message transcription, attendee/invitation management, arbitrary user sign-up, or general undo action. A recently added event can be deleted using its five-minute success-reply button.
+- No voice-message transcription, attendee/invitation management, arbitrary user sign-up, or general undo action. Event and recurring-series deletions require confirmation. A deleted one-off event can be restored using its five-minute **Undo** button; recurring occurrences, whole series, calendars, and reminder removals have no bot undo.
 - Only common weekly recurrence wording is supported; arbitrary recurrence schedules are not exposed as a dedicated command flow.
 - Scheduler-based reminders and daily agenda require the cron-job.org setup below; confirm successful `204` job runs before relying on them.
 
@@ -192,6 +192,15 @@ For example, `move Dentist to 4pm` may show two appointments; selecting one
 applies that change to it. Cancel dismisses the request. Choices expire after
 five minutes, and stale or repeated taps cannot execute the pending action.
 Plain numbers and ordinal replies such as `2` or `second` still work.
+
+Every event deletion asks for a second confirmation, including exact-title
+matches, fuzzy matches, and selections. Tap **Confirm deletion** or reply
+`confirm delete`; `cancel` also cancels it. After confirming a one-off event
+deletion, use the **Undo** button within five minutes to restore its available
+Google Calendar details and reminders. Recurring occurrences and whole-series
+deletions require confirmation but cannot be undone by the bot. Calendar
+deletion and reminder removal are unchanged. Confirmation and Undo choices
+expire on restart or when replaced by a new message.
 
 ## Duplicate message protection
 

@@ -184,6 +184,33 @@ class CalendarClient:
     def delete_event(self, event: CalendarEvent) -> None:
         self._service.events().delete(calendarId=event.calendar_id or self._calendar_id, eventId=event.event_id).execute()
 
+    def delete_event_with_undo(self, event: CalendarEvent) -> dict[str, object]:
+        calendar_id = event.calendar_id or self._calendar_id
+        events = self._service.events()
+        resource = events.get(calendarId=calendar_id, eventId=event.event_id).execute()
+        events.delete(calendarId=calendar_id, eventId=event.event_id).execute()
+        return resource
+
+    def restore_deleted_event(
+        self, resource: dict[str, object], calendar_id: str | None = None, calendar_name: str | None = None,
+    ) -> CalendarEvent:
+        read_only_fields = {
+            "kind", "etag", "id", "status", "htmlLink", "created", "updated",
+            "creator", "organizer", "iCalUID", "sequence", "recurringEventId",
+            "originalStartTime", "privateCopy", "locked", "hangoutLink",
+            "attendeesOmitted",
+        }
+        body = {key: value for key, value in resource.items() if key not in read_only_fields}
+        target_calendar_id = calendar_id or self._calendar_id
+        item = self._service.events().insert(
+            calendarId=target_calendar_id,
+            body=body,
+            supportsAttachments=True,
+            conferenceDataVersion=1,
+            sendUpdates="none",
+        ).execute()
+        return _to_event(item, self._timezone, target_calendar_id, calendar_name)
+
     def delete_series(self, event: CalendarEvent) -> None:
         self._service.events().delete(calendarId=event.calendar_id or self._calendar_id, eventId=event.recurring_event_id or event.event_id).execute()
 

@@ -169,6 +169,67 @@ def test_create_and_delete_owned_secondary_calendar():
     assert calls["delete"] == {"calendarId": "school-id"}
 
 
+def test_delete_for_undo_saves_google_resource_and_restore_reinserts_metadata():
+    calls = []
+    resource = {
+        "id": "original-id", "etag": "etag", "status": "confirmed",
+        "summary": "Dentist", "description": "Bring ID",
+        "start": {"dateTime": "2030-09-13T14:00:00+08:00"},
+        "end": {"dateTime": "2030-09-13T15:00:00+08:00"},
+        "extendedProperties": {"private": {"telegram_reminders": "reminder-data"}},
+    }
+
+    class Request:
+        def __init__(self, result=None):
+            self.result = result or {}
+
+        def execute(self):
+            return self.result
+
+    class Events:
+        def get(self, **kwargs):
+            calls.append(("get", kwargs))
+            return Request(resource)
+
+        def delete(self, **kwargs):
+            calls.append(("delete", kwargs))
+            return Request()
+
+        def insert(self, **kwargs):
+            calls.append(("insert", kwargs))
+            return Request({
+                "id": "restored-id", "summary": "Dentist",
+                "start": resource["start"], "end": resource["end"],
+            })
+
+    class Service:
+        def events(self):
+            return Events()
+
+    client = CalendarClient.__new__(CalendarClient)
+    client._service = Service()
+    client._calendar_id = "primary"
+    client._timezone = "Asia/Singapore"
+    event = CalendarEvent(
+        event_id="original-id", calendar_id="work", calendar_name="Work",
+        title="Dentist", start="2030-09-13T14:00:00+08:00",
+        end="2030-09-13T15:00:00+08:00",
+    )
+
+    snapshot = client.delete_event_with_undo(event)
+    restored = client.restore_deleted_event(snapshot, "work", "Work")
+
+    assert calls[0] == ("get", {"calendarId": "work", "eventId": "original-id"})
+    assert calls[1] == ("delete", {"calendarId": "work", "eventId": "original-id"})
+    _, insert_args = calls[2]
+    assert insert_args["calendarId"] == "work"
+    assert "id" not in insert_args["body"] and "etag" not in insert_args["body"]
+    assert insert_args["body"]["extendedProperties"] == resource["extendedProperties"]
+    assert insert_args["sendUpdates"] == "none"
+    assert restored.event_id == "restored-id"
+    assert restored.calendar_id == "work" and restored.calendar_name == "Work"
+
+
 def test_primary_or_unowned_calendar_cannot_be_deleted():
     client = CalendarClient.__new__(CalendarClient)
     with pytest.raises(ValueError, match="primary"):
