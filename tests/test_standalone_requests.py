@@ -74,7 +74,8 @@ async def test_weekday_reminder_corrects_wrong_parser_date(monkeypatch, text, no
     assert not calendar.mock_calls
     parser.match_event.assert_not_called()
     if expected:
-        cron.create_reminder.assert_awaited_once_with(123, 'Bring Darren’s Paddle', datetime.fromisoformat(expected))
+        message = 'bring paddle' if 'bring paddle' in text else 'Bring Darren’s Paddle'
+        cron.create_reminder.assert_awaited_once_with(123, message, datetime.fromisoformat(expected))
         assert 'Fri' in telegram.send_message.call_args.args[1]
     else:
         cron.create_reminder.assert_not_awaited()
@@ -91,6 +92,51 @@ def test_qualified_weekday_reminder_preserves_parser_date(text):
     original = reminder.due_at
     main._apply_standalone_clock_from_text(reminder, text, datetime.fromisoformat("2026-09-30T23:47:00+08:00"))
     assert reminder.due_at == original
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize('context', ['none', 'draft', 'saved edit'])
+@pytest.mark.parametrize('past', [False, True])
+async def test_message_first_weekday_reminder_never_calls_groq(monkeypatch, context, past):
+    import time
+    from app.models import CalendarEvent
+
+    now = datetime.fromisoformat('2026-11-04T14:10:00+08:00' if past else '2026-10-30T14:10:00+08:00')
+
+    class Clock(datetime):
+        @classmethod
+        def now(cls, tz=None):
+            return now.astimezone(tz)
+
+    monkeypatch.setattr(main, 'datetime', Clock)
+    monkeypatch.setattr(main, 'pending_event_drafts', {})
+    monkeypatch.setattr(main, 'pending_actions', {})
+    if context == 'draft':
+        main.pending_event_drafts[123] = main.PendingEventDraft('Dentist tomorrow', now, time.monotonic()+300)
+    elif context == 'saved edit':
+        event = CalendarEvent(event_id='saved', title='Dentist', start=now)
+        main.pending_actions[123] = main.PendingAction([event], time.monotonic()+300, 'created_edit', '', 'old')
+    settings = SimpleNamespace(timezone=ZoneInfo('Asia/Singapore'), user_timezone='Asia/Singapore')
+    telegram, calendar, parser, cron = AsyncMock(), Mock(), Mock(), AsyncMock()
+    parser.parse_standalone_reminder.side_effect = RuntimeError('Groq unavailable')
+    message = 'reply PF1101A Tutorial session 5 discussion thread'
+    await main.handle_message(123, f'remind me to {message} on  wednesday 10am',
+                              settings, telegram, calendar, parser, cron)
+    assert not parser.mock_calls and not calendar.mock_calls
+    assert 123 not in main.pending_actions and 123 not in main.pending_event_drafts
+    if past:
+        cron.create_reminder.assert_not_awaited()
+        assert 'past' in telegram.send_message.call_args.args[1]
+    else:
+        cron.create_reminder.assert_awaited_once_with(123, message, datetime.fromisoformat('2026-11-04T10:00:00+08:00'))
+        assert 'Wed 4 Nov 10:00 AM' in telegram.send_message.call_args.args[1]
+
+
+@pytest.mark.parametrize('suffix', ['Wednesday 13am', 'Wednesday 10:99am', 'last Wednesday 10am',
+                                   '9 October Wednesday 10am', 'Wednesday 10am next month'])
+def test_complex_or_invalid_message_first_schedule_keeps_parser(suffix):
+    assert main._simple_weekday_reminder(f'remind me to reply on {suffix}',
+        datetime.fromisoformat('2026-10-30T14:10:00+08:00')) is None
 
 @pytest.mark.asyncio
 @pytest.mark.parametrize('context', ['none', 'draft', 'expired draft', 'saved edit', 'expired saved edit'])

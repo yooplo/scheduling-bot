@@ -14,7 +14,7 @@ from fastapi import FastAPI, Header, HTTPException, Request, Response
 from .calendar_client import CalendarClient, CalendarMoveError
 from .config import ConfigurationError, Settings, get_settings
 from .cron_client import CronJobClient
-from .models import CalendarEvent, CalendarInfo, ParsedEdit, ParsedEvent, ReminderSpec, ScheduledReminder
+from .models import CalendarEvent, CalendarInfo, ParsedEdit, ParsedEvent, ParsedStandaloneReminder, ReminderSpec, ScheduledReminder
 from .parser import GroqParser, ParseError
 from .telegram_client import TelegramClient, valid_webhook_secret
 
@@ -713,7 +713,9 @@ async def handle_message(chat_id: int, text: str, settings: Settings, telegram: 
             await telegram.send_message(chat_id, "Independent reminders are not configured. Add CRON_JOB_API_KEY and SERVICE_BASE_URL to the service environment.")
             return
         now = datetime.now(settings.timezone)
-        standalone = await asyncio.to_thread(parser.parse_standalone_reminder, text, now, settings.user_timezone)
+        standalone = _simple_weekday_reminder(text, now)
+        if standalone is None:
+            standalone = await asyncio.to_thread(parser.parse_standalone_reminder, text, now, settings.user_timezone)
         _apply_standalone_clock_from_text(standalone, text, now)
         if standalone.confidence == "low" or standalone.due_at.tzinfo is None:
             await telegram.send_message(chat_id, "Tell me what to remind you about and when, for example: 'remind me to pay the bill tomorrow at 9am'.")
@@ -1926,6 +1928,23 @@ def _reminders_from_text(text: str) -> list[ReminderSpec]:
             message = re.split(r"\s+and\s+\d+\s*(?:minutes?|mins?|hours?|hrs?|days?)\s+before\b", message, maxsplit=1, flags=re.IGNORECASE)[0].strip()
         reminders.append(ReminderSpec(minutes_before=minutes, message=message))
     return reminders
+
+
+def _simple_weekday_reminder(text: str, now: datetime) -> ParsedStandaloneReminder | None:
+    match = re.fullmatch(
+        r"remind\s+me\s+to\s+(?P<message>.+?)\s+"
+        r"(?P<schedule>(?:(?:on|this|next)\s+)?"
+        r"(?:monday|tuesday|wednesday|thursday|friday|saturday|sunday)"
+        r"\s+(?:at\s+)?(?P<hour>\d{1,2})(?:[:.](?P<minute>\d{2}))?\s*(?:am|pm))\s*[.!]?",
+        text.strip(), flags=re.IGNORECASE,
+    )
+    if (not match or not 1 <= int(match['hour']) <= 12
+            or int(match['minute'] or 0) > 59 or _relative_weekday_date(text, now) is None
+            or not 1 <= len(match['message']) <= 1000):
+        return None
+    reminder = ParsedStandaloneReminder(message=match['message'], due_at=now, confidence="high")
+    _apply_standalone_clock_from_text(reminder, f"remind me {match['schedule']} to {match['message']}", now)
+    return reminder
 
 
 def _apply_standalone_clock_from_text(reminder, text: str, now: datetime) -> None:
