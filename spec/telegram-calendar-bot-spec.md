@@ -609,3 +609,12 @@ unconfirmed. This change removes the single-attempt failure mode.
 - Google API requests use an independent authorized HTTP transport per request because the underlying `httplib2` transport is not thread-safe. Dependency initialization is published atomically so a failed OAuth/client initialization cannot leave partial global state.
 - Independent reminder persistence depends on the cron-job.org REST API and its account quotas (normally 100 API requests per day). Without both `CRON_JOB_API_KEY` and `SERVICE_BASE_URL`, independent reminder creation is disabled while calendar features remain available.
 - Delivery depends on cron-job.org reaching the sleeping Render service; the first request after idle may be delayed.
+
+## 15. Repository Code Review
+
+- The intended review provider is the Codex GitHub integration, enabled in
+  Codex settings. The repository must not run the API-key-backed PR Agent workflow.
+- Codex repository access and automatic code review are account settings outside
+  this repository. Removing a workflow does not enable or verify those settings.
+- Review setup instructions belong in the README. This change does not alter the
+  bot's runtime Groq integration or require an OpenAI API key for the bot.
