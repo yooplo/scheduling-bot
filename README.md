@@ -5,7 +5,9 @@ A private, webhook-based FastAPI service that combines deterministic command rou
 Include a location naturally when creating an event, for example: `Dinner at La Pasta Saturday 7–9pm`. Locations are shown in upcoming lists when provided.
 
 Send a **photo or voice note in private chat** to read an image or transcribe
-speech using Groq. Photo captions can guide extraction, such as “Read the
+speech using Groq. Image previews display bold labels and readable bullets,
+with concise summaries that focus on the content. Voice transcripts preserve
+the spoken text. Photo captions can guide extraction, such as “Read the
 appointment details.” Check the preview, then reply `use media` within five
 minutes to process it through the usual scheduling flow. You can instead send
 corrected text or `/cancel`. A preview alone makes no calendar or reminder

@@ -17,6 +17,7 @@ from .config import ConfigurationError, Settings, get_settings
 from .cron_client import CronJobClient
 from .models import CalendarEvent, CalendarInfo, ParsedEdit, ParsedEvent, ParsedStandaloneReminder, ReminderSpec, ScheduledReminder
 from .media import PHOTO_LIMIT, VOICE_LIMIT, interpret_media
+from .message_formatting import format_media_preview
 from .parser import GroqParser, ParseError
 from .telegram_client import TelegramClient, valid_webhook_secret
 
@@ -271,7 +272,7 @@ async def handle_media(chat_id: int, message: dict, settings: Settings, telegram
             return
         marker = (text, time.monotonic() + PENDING_TTL_SECONDS)
         pending_media[chat_id] = marker
-        await telegram.send_message(chat_id, f"I read:\n{text}\n\nCheck the details. Reply use media within 5 minutes to process this as a request, send corrected text, or /cancel.")
+        await telegram.send_message(chat_id, format_media_preview(text, photo=kind == "photo"), parse_mode="HTML")
     except Exception:
         # HTTP errors may include the bot token in the URL; do not log exceptions.
         if pending_media.get(chat_id) is marker:
