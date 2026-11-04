@@ -206,6 +206,28 @@ other automation uses it. The bot continues using Groq for its runtime AI calls.
 
 Render currently offers free Python web services, but they sleep after 15 minutes idle and can take about a minute to wake. Telegram retries failed webhook deliveries, so the bot should recover, but the first reply after idling can be delayed. Render free services also have ephemeral disks, which is why pending delete choices are intentionally short-lived in memory. See [Render's free-service limits](https://render.com/docs/free).
 
+### Deployment checks after merges
+
+The **Check Render deployment** GitHub Action runs on every push to `main`,
+including merged PRs. It waits for Render's existing automatic deployment and
+checks `https://telegram-calendar-bot-llui.onrender.com/healthz` every 20 seconds
+for up to 15 minutes. HTTP 200, `status: ok`, and a `commit` matching the pushed
+GitHub SHA are all required; a healthy old version cannot pass.
+
+The public URL is included in the workflow. To change it without editing code,
+set the repository Actions variable `BOT_SERVICE_URL` to the HTTPS origin
+(without a path). No Render API key or bot secrets are needed in GitHub.
+Render supplies `RENDER_GIT_COMMIT` automatically; `/healthz` reports it as
+`commit` and reports `unknown` in local environments without that variable.
+
+View the result under GitHub **Actions → Check Render deployment**. A newer
+push on the same branch cancels an older check. You can also use **Run workflow**
+to recheck the selected branch's current commit. A failure means the expected
+revision did not become healthy in time; inspect Render build/deploy logs and
+confirm automatic deployments track `main`. The check does not test Telegram,
+Google Calendar, Groq, reminders, or credential validity. The first live run
+occurs after merging this workflow and has not yet been verified.
+
 ## Help
 
 Use `/help` in private chat to browse feature categories and copy example
