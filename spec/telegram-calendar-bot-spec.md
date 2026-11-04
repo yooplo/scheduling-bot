@@ -650,3 +650,23 @@ live media integrations have not been verified):
   this repository. Removing a workflow does not enable or verify those settings.
 - Review setup instructions belong in the README. This change does not alter the
   bot's runtime Groq integration or require an OpenAI API key for the bot.
+
+## 16. Post-merge Deployment Verification
+
+- On pushes to `main` (including merges), GitHub Actions waits for Render's
+  existing automatic deployment; it does not trigger deployments itself.
+- `GET /healthz` returns `status: ok` and `commit`, the full `RENDER_GIT_COMMIT`
+  provided by Render (`unknown` outside Render). It remains independent of bot
+  credentials and does not call Telegram, Google, Groq, or cron services.
+- The check requires HTTP 200, valid JSON, `status: ok`, and an exact match
+  between `commit` and the triggering GitHub SHA. A healthy older deployment
+  cannot pass. Retry transient network/HTTP/JSON errors and mismatches every
+  20 seconds for up to 15 minutes. A missing URL or timeout fails the action.
+- The default public origin is `https://telegram-calendar-bot-llui.onrender.com`.
+  Override it with the GitHub Actions repository variable `BOT_SERVICE_URL`.
+  No bot credentials or Render API key are needed. The job
+  has only contents-read permissions and can also be dispatched manually for
+  the selected branch's SHA. New checks on the same branch cancel older ones.
+- This verifies the deployed HTTP process and code revision, not external
+  integrations, webhook delivery, reminders, or successful bot configuration.
+  Automated tests use mocked HTTP responses; a live workflow run is separate.

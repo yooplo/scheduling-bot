@@ -3,6 +3,7 @@ from __future__ import annotations
 import asyncio
 import colorsys
 import logging
+import os
 import re
 import time
 from dataclasses import dataclass, field
@@ -131,7 +132,7 @@ def dependencies() -> tuple[Settings, TelegramClient, dict[int, CalendarClient],
 
 @app.get("/healthz")
 async def healthz() -> dict[str, str]:
-    return {"status": "ok"}
+    return {"status": "ok", "commit": os.getenv("RENDER_GIT_COMMIT", "unknown")}
 
 
 @app.post("/webhook")
