@@ -585,6 +585,14 @@ live media integrations have not been verified):
   guide interpretation; default to describing the image and extracting visible
   event details without inventing dates, times, or scheduling commands. Voice
   notes are transcribed verbatim. Results are limited to 3000 characters.
+- Photo previews render Markdown bold, inline code, headings, and bullet lists
+  as Telegram HTML with escaped user/model content. Raw HTML is displayed as
+  text, never trusted as markup. Unmatched formatting markers remain literal.
+  Voice transcripts are escaped and displayed verbatim. Only preview display
+  changes; the original interpretation remains the pending request text.
+- Image summaries focus on the main content and useful dates/details; omit
+  phone status bars and app controls unless the caption asks for them. Use
+  short paragraphs or bullets with blank lines between sections.
 - Show the interpreted text without calendar or reminder operations. The user
   may send corrected text normally, or reply exactly `use media` within five
   minutes to route the preview through the existing text handler, including

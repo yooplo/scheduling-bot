@@ -208,3 +208,17 @@ async def test_invalid_webhook_secret_cannot_download_media(bot):
     assert error.value.status_code == 401
     request.json.assert_not_awaited()
     telegram.download_file.assert_not_awaited()
+
+
+@pytest.mark.asyncio
+async def test_photo_preview_formats_display_but_routes_original_text(bot):
+    send, telegram, interpreter, handler = bot
+    original = '**Deadline:** Friday 20 Nov 2026\n* Submit A&B <claim>'
+    interpreter.return_value = original
+    await send(PHOTO)
+    assert telegram.send_message.call_args.kwargs['parse_mode'] == 'HTML'
+    assert '<b>Deadline:</b>' in telegram.send_message.call_args.args[1]
+    assert '• Submit A&amp;B &lt;claim&gt;' in telegram.send_message.call_args.args[1]
+    handler.assert_not_awaited()
+    await send({'text': 'use media'})
+    assert handler.call_args.args[1] == original

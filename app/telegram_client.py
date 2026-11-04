@@ -42,8 +42,10 @@ class TelegramClient:
                 raise ValueError("Empty media file")
             return bytes(data)
 
-    async def send_message(self, chat_id: int, text: str, reply_markup: dict | None = None) -> None:
+    async def send_message(self, chat_id: int, text: str, reply_markup: dict | None = None, *, parse_mode: str | None = None) -> None:
         payload = {"chat_id": chat_id, "text": text}
+        if parse_mode:
+            payload["parse_mode"] = parse_mode
         if reply_markup:
             payload["reply_markup"] = reply_markup
         async with httpx.AsyncClient(timeout=15) as client:
