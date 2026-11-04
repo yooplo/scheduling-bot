@@ -793,6 +793,14 @@ lead times must be recoverable without replaying invalid history.
 Reminder messages are preserved as text and cannot change the event's date or
 clock. Local scheduling overrides ignore reminder clauses. All-day/timed
 corrections use the latest time instruction and reject missing timezone offsets.
+Location corrections preserve scheduling clauses in the same answer: `at Cafe
+on Sunday at 4pm` changes both location and schedule. Quoted venue names and bare
+location names such as `Clinic Monday` remain data. The same rule applies to
+explicit location/title/calendar corrections followed by scheduling clauses.
+Reminder lead-time matching consumes complete number expressions, including
+space/hyphen compounds. Unsupported expressions use validated parser output;
+ambiguous combinations request explicit minute values rather than saving a
+partial number or silently dropping an alert.
 
 Private-chat async continuations are scoped to the current valid input, per chat.
 A new input or cancellation invalidates older parsing, matching, availability,

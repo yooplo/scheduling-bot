@@ -39,7 +39,10 @@ MONTH_NAMES = r"jan(?:uary)?|feb(?:ruary)?|mar(?:ch)?|apr(?:il)?|may|jun(?:e)?|j
 NAMED_DATE_PATTERN = rf"\b(\d{{1,2}})(?:st|nd|rd|th)?\s+({MONTH_NAMES})(?:\s+(\d{{4}}))?\b"
 NUMERIC_DATE_PATTERN = r"\b(?:(\d{4})-(\d{1,2})-(\d{1,2})|(\d{1,2})[-/](\d{1,2})(?:[-/](\d{4}))?)\b(?![-/]\d)"
 DATE_HINT_PATTERN = rf"\b(?:{WEEKDAY_NAMES}|{MONTH_NAMES}|today|tonight|tomorrow|tmr|next|this|last|following|after|before|weeks?|months?)\b|{NUMERIC_DATE_PATTERN}"
-REMINDER_LEAD_PATTERN = r"\b(\d+(?:\.\d+)?|(?:one|two|three) and a half|one|an?|two|three|half(?: an?)?)\s*(minutes?|mins?|m|hours?|hrs?|h|days?|d)\s+before\b"
+NUMBER_WORD_PATTERN = r"(?:zero|one|two|three|four|five|six|seven|eight|nine|ten|eleven|twelve|thirteen|fourteen|fifteen|sixteen|seventeen|eighteen|nineteen|twenty|thirty|forty|fifty|sixty|seventy|eighty|ninety|hundred|thousand|million|an?|half|quarter|point)"
+REMINDER_AMOUNT_PATTERN = rf"(?:[-+−]?(?:\d+(?:[,.]\d+)*(?:/\d+)?|\.\d+)|{NUMBER_WORD_PATTERN})"
+REMINDER_QUANTITY_PATTERN = rf"{REMINDER_AMOUNT_PATTERN}(?:[ \t‐‑–—-]+(?:and|{REMINDER_AMOUNT_PATTERN}))*"
+REMINDER_LEAD_PATTERN = rf"(?<![\w.+/−-])({REMINDER_QUANTITY_PATTERN})\s*(minutes?|mins?|m|hours?|hrs?|h|days?|d|weeks?|w)\s+before\b"
 RECURRENCE_HINT_PATTERN = r"\b(?:every|repeat(?:s|ing)?|recurr(?:ing|ence)|daily|weekly|monthly|yearly|once|one[- ]off)\b"
 WORD_CLOCK_PATTERN = r"\b(?:noon|midnight|midday)\b"
 DURATION_HINT_PATTERN = r"\b(?:hours?|hrs?|minutes?|mins?|days?|weeks?|duration)\b|\b\d+(?:\.\d+)?\s*(?:hours?|hrs?|minutes?|mins?|days?|weeks?|[hm])\b"
@@ -817,9 +820,8 @@ def _unqualified_reminder_request(text: str) -> bool:
     text = _command_text(text)
     prefix = r"(?:remind me|(?:set|add|change|update|edit)(?: (?:a|the|another|additional))? reminder)"
     clock = r"\d{1,2}(?:[:.]\d{2})?\s*(?:am|pm)"
-    number_words = r"(?:zero|one|two|three|four|five|six|seven|eight|nine|ten|eleven|twelve|thirteen|fourteen|fifteen|sixteen|seventeen|eighteen|nineteen|(?:twenty|thirty|forty|fifty|sixty|seventy|eighty|ninety)(?:[- ](?:one|two|three|four|five|six|seven|eight|nine))?)"
-    word_lead = rf"{number_words}\s+(?:minutes?|hours?|days?|weeks?) before"
-    return bool(re.fullmatch(rf"{prefix}\s+(?:(?:to|for|at)\s+)?(?:{REMINDER_LEAD_PATTERN}|{word_lead}|{clock})(?:\s*(?:to\s+|:\s*).+)?", text.strip(), flags=re.I))
+    leads = rf"{REMINDER_LEAD_PATTERN}(?:\s*(?:,|and|also)\s*{REMINDER_LEAD_PATTERN})*"
+    return bool(re.fullmatch(rf"{prefix}\s+(?:(?:to|for|at)\s+)?(?:{leads}|{clock})(?:\s*(?:to\s+|:\s*).+)?", text.strip(), flags=re.I))
 
 
 def _media_field_correction(text: str) -> bool:
@@ -1442,6 +1444,9 @@ async def _add_event(chat_id, text, settings, telegram, calendar, parser, now=No
         return
     if reminder_instructions and reminder_instructions[-1][0].endswith("_model"):
         action, instruction = reminder_instructions[-1]
+        if len(re.findall(REMINDER_LEAD_PATTERN, _instruction_text(instruction), flags=re.I)) > 1:
+            await _ask_event_detail(chat_id, text, "Please restate all desired reminders in minutes, for example '60 minutes before and 15 minutes before'.", now, telegram)
+            return
         if action == "remove_model" or not event.reminder_minutes:
             await _ask_event_detail(chat_id, text, "Please specify the reminder lead time in minutes, for example '15 minutes before'.", now, telegram)
             return
@@ -2018,7 +2023,7 @@ def _is_standalone_reminder_request(text: str) -> bool:
     # A lead time links a reminder to an existing event (for example,
     # "set a reminder one day before IPPT"). An absolute/relative clock time
     # instead describes an independent notification.
-    if re.search(r"\b(?:minutes?|mins?|hours?|hrs?|days?)\s+before\b", lowered):
+    if re.search(REMINDER_LEAD_PATTERN, lowered, flags=re.I) or re.search(r"\b(?:minutes?|mins?|hours?|hrs?|days?|weeks?)\s+before\b", lowered):
         return False
     command = re.match(
         r"^(?:please\s+)?(?:remind\s+me|(?:set(?:\s+me)?|add)(?:\s+up)?\s+(?:a\s+)?reminder)\b",
@@ -2196,15 +2201,24 @@ def _without_clock_ranges(text: str) -> str:
 
 
 def _scheduling_text(text: str) -> str:
-    if re.match(r"^\s*(?:(?:actually|sorry|instead)[, ]+)?(?:call it|rename|(?:change|set) (?:the )?(?:title|name|location|calendar) to)\b", text, flags=re.I):
-        return ""
+    field = re.match(r"^\s*(?:(?:actually|sorry|instead)[, ]+)?(?:call it|rename|(?:change|set) (?:the )?(?:title|name|location|calendar) to)\b", text, flags=re.I)
     title = re.match(r"^\s*(?:(?:add|create|put)\s+)?(?P<title>'[^'\n]*'|\"[^\"\n]*\")", text, flags=re.I)
     if title:
         start, end = title.span("title")
         text = text[:start] + " " * (end - start) + text[end:]
-    if re.match(r"^\s*at\s+", text, flags=re.I) and not re.match(r"^\s*at\s+(?:\d|noon\b|midnight\b|midday\b)", text, flags=re.I):
-        clock = re.search(r"\b\d{1,2}(?:[:.]\d{2})?\s*(?:am|pm)\b|" + WORD_CLOCK_PATTERN, _instruction_text(text), flags=re.I)
-        return clock[0] if clock else ""
+    location = re.match(r"^\s*(?:(?:actually|sorry|instead)[, ]+)?at\s+(?!\d|noon\b|midnight\b|midday\b)", text, flags=re.I)
+    if field or location:
+        data_end = (field or location).end()
+        # Only explicit schedule boundaries end the literal field value. Mask
+        # quoted data first so 'Cafe on Sunday' cannot introduce a date.
+        boundary = re.search(
+            rf"\b(?:on\s+(?={DATE_HINT_PATTERN}|\d)|(?:this|next)\s+(?:{WEEKDAY_NAMES})\b|today\b|tomorrow\b|tmr\b|tonight\b|at\s+(?=\d|noon\b|midnight\b|midday\b)|every\s+|remind me\b)",
+            _instruction_text(text)[data_end:], flags=re.I,
+        )
+        if boundary is None and location:
+            boundary = re.search(r"\b\d{1,2}(?:[:.]\d{2})?\s*(?:am|pm)\b|" + WORD_CLOCK_PATTERN,
+                                 _instruction_text(text)[data_end:], flags=re.I)
+        text = text[data_end + boundary.start():] if boundary else ""
     reminder = re.search(r"\b(?:remind me|(?:set|add|change)(?: (?:a|the|another))? reminder)\b|" + REMINDER_LEAD_PATTERN, _instruction_text(text), flags=re.I)
     return text[:reminder.start()] if reminder else text
 
@@ -2667,11 +2681,23 @@ def _instruction_text(text: str) -> str:
     return re.sub(r"(?<!\w)(?:'[^'\n]*'|\"[^\"\n]*\")(?!\w)", lambda match: " " * len(match[0]), text)
 
 
+def _local_reminder_amount(amount: str) -> float | None:
+    words = {"one": 1, "a": 1, "an": 1, "two": 2, "three": 3, "half": .5, "half a": .5, "half an": .5, "one and a half": 1.5, "two and a half": 2.5, "three and a half": 3.5}
+    amount = re.sub(r"\s+", " ", amount.lower())
+    if amount in words:
+        return words[amount]
+    try:
+        return float(amount)
+    except ValueError:
+        return None
+
+
 def _reminder_instructions(text: str) -> list[tuple[str, str]] | None:
     instructions = []
     for part in text.split("\nUser follow-up:"):
         control = _instruction_text(part)
-        lead = re.search(REMINDER_LEAD_PATTERN, control, flags=re.I)
+        leads = list(re.finditer(REMINDER_LEAD_PATTERN, control, flags=re.I))
+        lead = leads[0] if leads else None
         if lead:
             prefix = control[:lead.start()]
             if re.match(r"^\s*(?:(?:actually|sorry|instead)[, ]+)?(?:remove|delete|disable|cancel)\b", prefix, flags=re.I):
@@ -2680,6 +2706,8 @@ def _reminder_instructions(text: str) -> list[tuple[str, str]] | None:
                 action = "append"
             else:
                 action = "replace"
+            if any(_local_reminder_amount(match[1]) is None for match in leads):
+                action += "_model"
             instructions.append((action, part))
         elif re.search(r"\b(?:no|without|remove|delete|disable|cancel)\s+(?:(?:the|any|all)\s+)?reminders?\b|\b(?:don't|do not) remind me\b", control, flags=re.I):
             instructions.append(("clear", part))
@@ -2705,11 +2733,9 @@ def _reminders_from_text(text: str) -> list[ReminderSpec]:
         parsed = []
         matches = list(re.finditer(REMINDER_LEAD_PATTERN, _instruction_text(part), flags=re.I))
         for index, match in enumerate(matches):
-            amount = match[1].lower()
-            words = {"one": 1, "a": 1, "an": 1, "two": 2, "three": 3, "half": .5, "half a": .5, "half an": .5, "one and a half": 1.5, "two and a half": 2.5, "three and a half": 3.5}
-            amount = words[amount] if amount in words else float(amount)
+            amount = _local_reminder_amount(match[1])
             unit = match[2].lower()
-            minutes = amount * (1440 if unit.startswith("d") else 60 if unit.startswith("h") else 1)
+            minutes = amount * (10080 if unit.startswith("w") else 1440 if unit.startswith("d") else 60 if unit.startswith("h") else 1)
             if not float(minutes).is_integer() or not 1 <= minutes <= 10080:
                 raise ValueError("Reminder lead times must be whole minutes between 1 minute and 7 days.")
             remainder = part[match.end():matches[index + 1].start() if index + 1 < len(matches) else len(part)]
@@ -2797,19 +2823,8 @@ def _apply_standalone_clock_from_text(reminder, text: str, now: datetime) -> Non
 
 def _reminder_minutes_from_text(text: str) -> int | None:
     """Handle common reminder expressions even if the LLM omits the optional field."""
-    lowered = text.lower()
-    match = re.search(r"\b(\d+)\s*(minutes?|mins?|hours?|hrs?|days?)\s+before\b", lowered)
-    if match:
-        amount = int(match.group(1))
-        unit = match.group(2)
-        multiplier = 1440 if unit.startswith("day") else 60 if unit.startswith(("hour", "hr")) else 1
-        return amount * multiplier
-    words = {"one": 1, "a": 1, "an": 1, "two": 2, "three": 3}
-    match = re.search(r"\b(one|a|an|two|three)\s+(minutes?|hours?|days?)\s+before\b", lowered)
-    if match:
-        multiplier = 1440 if match.group(2).startswith("day") else 60 if match.group(2).startswith("hour") else 1
-        return words[match.group(1)] * multiplier
-    return None
+    reminders = _reminders_from_text(text)
+    return reminders[0].minutes_before if reminders else None
 
 
 def _apply_recurrence_from_text(event, text: str) -> None:
