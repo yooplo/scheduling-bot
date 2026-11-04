@@ -15,6 +15,7 @@ from .calendar_client import CalendarClient, CalendarMoveError
 from .config import ConfigurationError, Settings, get_settings
 from .cron_client import CronJobClient
 from .models import CalendarEvent, CalendarInfo, ParsedEdit, ParsedEvent, ParsedStandaloneReminder, ReminderSpec, ScheduledReminder
+from .media import PHOTO_LIMIT, VOICE_LIMIT, interpret_media
 from .parser import GroqParser, ParseError
 from .telegram_client import TelegramClient, valid_webhook_secret
 
@@ -73,6 +74,7 @@ class PendingEventDraft:
 
 
 pending_event_drafts: dict[int, PendingEventDraft] = {}
+pending_media: dict[int, tuple[str, float]] = {}
 standalone_deliveries_in_flight: set[tuple[int, int]] = set()
 delivered_standalone_reminders: dict[tuple[int, int], float] = {}
 reminder_delivery_history: dict[tuple[int, int], tuple[float, ScheduledReminder]] = {}
@@ -151,6 +153,7 @@ async def webhook(request: Request, x_telegram_bot_api_secret_token: str | None 
                 await telegram.answer_callback_query(callback.get("id", ""), "Not available here.")
                 return {"ok": True}
             try:
+                pending_media.pop(chat_id, None)
                 if callback["data"].startswith("help:"):
                     topic = callback["data"].removeprefix("help:")
                     await telegram.answer_callback_query(callback.get("id", ""))
@@ -187,7 +190,8 @@ async def webhook(request: Request, x_telegram_bot_api_secret_token: str | None 
     first_name = (message.get("from", {}).get("first_name") or "").strip()
     text = (message.get("text") or "").strip()
     calendar = calendars.get(sender_id)
-    if not chat_id or not text:
+    has_media = bool(message.get("photo") or message.get("voice"))
+    if not chat_id or not (text or has_media):
         return {"ok": True}
     if chat.get("type") in {"group", "supergroup"} and chat_id != settings.telegram_group_id:
         return {"ok": True}
@@ -209,9 +213,23 @@ async def webhook(request: Request, x_telegram_bot_api_secret_token: str | None 
         processed_message_updates[key] = now + 86400
     try:
         if chat.get("type") in {"group", "supergroup"}:
+            if has_media:
+                return {"ok": True}
             await handle_group_schedule(chat_id, sender_id, text, settings, telegram, calendars)
             return {"ok": True}
-        if chat.get("type") != "private":
+        if chat.get("type") != "private" or chat_id != sender_id:
+            return {"ok": True}
+        if has_media:
+            await handle_media(chat_id, message, settings, telegram)
+            return {"ok": True}
+        preview = pending_media.pop(chat_id, None)
+        if text.lower() == "use media":
+            if not preview or not preview[0] or preview[1] <= time.monotonic():
+                await telegram.send_message(chat_id, "No active media preview. Please send the photo or voice note again.")
+                return {"ok": True}
+            text = preview[0]
+        elif preview and text.lower() in {"cancel", "/cancel"}:
+            await telegram.send_message(chat_id, "Media preview cancelled.")
             return {"ok": True}
         if re.match(r"^/start(?:@\w+)?(?:\s|$)", text, flags=re.IGNORECASE):
             pending_event_drafts.pop(chat_id, None)
@@ -224,6 +242,40 @@ async def webhook(request: Request, x_telegram_bot_api_secret_token: str | None 
         logger.exception("Failed handling Telegram message chat_id=%s", chat_id)
         await telegram.send_message(chat_id, "Sorry, I couldn't complete that. Please try again.")
     return {"ok": True}
+
+
+async def handle_media(chat_id: int, message: dict, settings: Settings, telegram: TelegramClient) -> None:
+    # A new input invalidates both previous previews and unrelated pending actions.
+    for store in (pending_media, pending_event_drafts, pending_event_conflicts,
+                  pending_actions, pending_calendar_deletions, recent_reminder_lists):
+        store.pop(chat_id, None)
+    for key, value in list(pending_media.items()):
+        if value[1] <= time.monotonic():
+            pending_media.pop(key, None)
+    marker = ("", time.monotonic() + PENDING_TTL_SECONDS)
+    pending_media[chat_id] = marker
+    try:
+        voice = message.get("voice")
+        kind = "voice" if voice else "photo"
+        info = voice or max(message["photo"], key=lambda photo: photo.get("width", 0) * photo.get("height", 0))
+        limit = VOICE_LIMIT if voice else PHOTO_LIMIT
+        if info.get("file_size", 0) > limit or (voice and voice.get("duration", 0) > 120):
+            pending_media.pop(chat_id, None)
+            await telegram.send_message(chat_id, "Please send a photo at most 4 MiB or a voice note at most 10 MiB and 2 minutes.")
+            return
+        data = await telegram.download_file(info["file_id"], limit)
+        text = await interpret_media(data, kind, message.get("caption") or "", settings)
+        # A newer message or callback can supersede a slow model response.
+        if pending_media.get(chat_id) is not marker:
+            return
+        marker = (text, time.monotonic() + PENDING_TTL_SECONDS)
+        pending_media[chat_id] = marker
+        await telegram.send_message(chat_id, f"I read:\n{text}\n\nCheck the details. Reply use media within 5 minutes to process this as a request, send corrected text, or /cancel.")
+    except Exception:
+        # HTTP errors may include the bot token in the URL; do not log exceptions.
+        if pending_media.get(chat_id) is marker:
+            pending_media.pop(chat_id, None)
+            await telegram.send_message(chat_id, "I couldn't read that media. Try a clearer photo or shorter voice note, or send the request as text.")
 
 
 async def handle_group_schedule(
@@ -1732,7 +1784,7 @@ HELP_TOPICS = {
 
 async def _send_help(chat_id, telegram, topic="menu"):
     if topic == "menu":
-        text = "What would you like to do? Choose a category for example messages.\n\n/now — current date, time, and timezone\nSend /help anytime to return here."
+        text = "What would you like to do? Choose a category for example messages.\n\n/now — current date, time, and timezone\nSend a photo or voice note for an AI preview, then reply use media to process it.\nSend /help anytime to return here."
         buttons = [[{"text": title, "callback_data": f"help:{key}"}] for key, (title, _) in HELP_TOPICS.items()]
     else:
         text = HELP_TOPICS[topic][1]
