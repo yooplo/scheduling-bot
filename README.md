@@ -150,6 +150,24 @@ git push -u origin main
 
 Before `git add`, run `git status` and make sure `.env` and `client_secret.json` are not listed. GitHub Actions secrets are unnecessary for this project: secrets belong in Render's environment-variable panel, never in the repository.
 
+### Codex code review
+
+Use the Codex GitHub integration for pull request reviews. The previous PR Agent
+GitHub Actions workflow has been removed; repository reviews no longer use its
+`OPENAI_KEY` secret.
+
+1. Open [Codex code review settings](https://chatgpt.com/codex/settings/code-review)
+   using the ChatGPT account with your Codex subscription.
+2. Ensure the connected GitHub account grants Codex access to
+   `yooplo/scheduling-bot`, and enable automatic code review for this repository.
+3. Open a pull request and check for a Codex review. To request a review manually,
+   comment `@codex review` on the pull request after access is configured.
+
+Codex access, automatic review preferences, plan limits, and usage are managed
+in Codex settings. Removing the workflow alone does not enable the integration.
+You may delete the old `OPENAI_KEY` GitHub Actions secret once you confirm no
+other automation uses it. The bot continues using Groq for its runtime AI calls.
+
 ## Deploy on Render's free tier
 
 1. Create an account at [Render](https://render.com/) and connect GitHub.
