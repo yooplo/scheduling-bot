@@ -652,7 +652,8 @@ async def handle_media_callback(chat_id, callback_id, data, settings, telegram, 
         await telegram.send_message(chat_id, "Event suggestion cancelled.")
         return
     # Recheck the current calendar only after confirmation; source text cannot bypass overlaps.
-    await _check_and_create_event(chat_id, preview.event, "", preview.now, telegram, calendar)
+    request_text = re.sub(r"\badd\s+anyway\b", "add", preview.request_text, flags=re.I)
+    await _check_and_create_event(chat_id, preview.event, request_text, preview.now, telegram, calendar)
 
 
 def _clear_conversation(chat_id):
@@ -678,6 +679,30 @@ def _read_only_request(text):
             or _is_calendar_list_request(lower)
             or any(phrase in lower for phrase in FREE_TIME_PHRASES)
             or bool(re.match(r"^(?:list|upcoming|schedule|plans|what(?:'s|s| are)|show (?:my |the )?(?:schedule|events))\b", lower)))
+
+
+def _replaces_pending_followup(text: str, action: str) -> bool:
+    """Separate a new event command from details answering the open question."""
+    lowered = text.lower().strip()
+    if re.match(r"^(?:delete|remove|cancel|disable)\s+\S", lowered):
+        return True
+    if _is_existing_reminder_request(lowered):
+        if action != "followup_remind":
+            return True
+        if re.search(r"\b(?:before|for|about)\s+(?:it|that|this event|the event)(?:\s|$)", lowered):
+            return False
+        prefix = r"(?:remind me|(?:set|add|change|update|edit)(?: (?:a|the|another))? reminder)"
+        lead_time = r"(?:\d+(?:\.\d+)?|an?|one|two|three|half|quarter|the)\s*(?:minutes?|mins?|hours?|hrs?|days?) before"
+        clock = r"\d{1,2}(?:[:.]\d{2})?\s*(?:am|pm)"
+        return not re.fullmatch(rf"{prefix}\s+(?:(?:to|for|at)\s+)?(?:{lead_time}|{clock})", lowered)
+    command = re.match(r"^(?:change|edit|move|reschedule|update)\s+(.+)$", lowered)
+    if not command:
+        return False
+    if action != "followup_edit":
+        return True
+    target = re.split(r"\b(?:to|at|on|for|by|until)\b", command.group(1), maxsplit=1)[0].strip()
+    return bool(target) and not re.fullmatch(
+        r"(?:the )?(?:it|that|this(?: event)?|event|date|time|duration|length|location|calendar|title|name)", target)
 
 
 async def handle_message(chat_id, text, settings, telegram, calendar, parser, cron=None):
@@ -735,7 +760,9 @@ async def handle_message(chat_id, text, settings, telegram, calendar, parser, cr
             pending_actions.pop(chat_id, None)
             await telegram.send_message(chat_id, "Follow-up cancelled. The saved event is unchanged.")
             return
-        elif (text.startswith("/") and not _read_only_request(text)) or _is_explicit_add_request(lower) or _is_standalone_reminder_request(lower):
+        elif ((text.startswith("/") and not _read_only_request(text)) or _is_explicit_add_request(lower)
+              or _is_standalone_reminder_request(lower) or _replaces_pending_followup(text, pending.action)):
+            _remember_event(chat_id, pending.events[0])
             pending_actions.pop(chat_id, None)
             pending = None
         elif pending.expires_at <= time.monotonic():
@@ -1300,7 +1327,8 @@ async def handle_conflict_callback(chat_id, callback_id, data, settings, telegra
                 return
             await _commit_edit(chat_id, pending.existing, proposed, pending.series, telegram, calendar)
         else:
-            await _check_and_create_event(chat_id, proposed, "", pending.now, telegram, calendar)
+            request_text = re.sub(r"\badd\s+anyway\b", "add", pending.request_text, flags=re.I)
+            await _check_and_create_event(chat_id, proposed, request_text, pending.now, telegram, calendar)
         return
     if action == "cancel":
         await telegram.send_message(chat_id, "Event edit cancelled." if pending.existing else "Event creation cancelled.")
@@ -1635,7 +1663,9 @@ async def _edit_event(chat_id: int, text: str, existing: CalendarEvent, settings
         pending_actions[chat_id] = PendingAction([existing], time.monotonic() + PENDING_TTL_SECONDS, "followup_edit", text)
         await telegram.send_message(chat_id, f"What date or time should I use for {existing.title} — {_format_event_range(existing)}? For example, 'Friday after 7pm for 1 hour'. Reply within 5 minutes, or /cancel.")
         return
-    if preserve_clock and not _has_explicit_event_time(destination) and not re.search(r"\b(?:all|whole)[\s-]+day\b", destination, flags=re.IGNORECASE):
+    if (preserve_clock and not _has_explicit_event_time(destination)
+            and not re.search(r"\b(?:hours?|hrs?|minutes?|mins?|days?|weeks?|duration)\b|\b\d+(?:\.\d+)?\s*(?:hours?|hrs?|minutes?|mins?|days?|weeks?|[hm])\b", destination, flags=re.I)
+            and not re.search(r"\b(?:all|whole)[\s-]+day\b", destination, flags=re.I)):
         target = _local_schedule_date(destination, settings, now) or edited.start.astimezone(settings.timezone).date()
         local_start = existing.start.astimezone(settings.timezone)
         local_end = (existing.end or existing.start).astimezone(settings.timezone)
@@ -2325,8 +2355,11 @@ def _reminder_confirmation(reminders: list[ReminderSpec]) -> str:
 
 
 def _reminder_message_from_text(text: str) -> str | None:
-    match = re.search(r"\bbefore\s*(?:to\s+|:\s*)(.+)$", text, flags=re.IGNORECASE)
-    return match.group(1).strip() if match else None
+    for answer in reversed(text.split("\nUser follow-up:")):
+        match = re.search(r"\bbefore\s*(?:to\s+|:\s*)(.+)$", answer, flags=re.IGNORECASE)
+        if match:
+            return match.group(1).strip()
+    return None
 
 
 def _reminders_from_text(text: str) -> list[ReminderSpec]:
@@ -2335,7 +2368,7 @@ def _reminders_from_text(text: str) -> list[ReminderSpec]:
         amount = int(match.group(1))
         unit = match.group(2).lower()
         minutes = amount * (1440 if unit.startswith("day") else 60 if unit.startswith(("hour", "hr")) else 1)
-        remainder = text[match.end():]
+        remainder = text[match.end():].split("\nUser follow-up:", 1)[0]
         message_match = re.match(r"\s*(?:to\s+|:\s*)([^,;.]+)", remainder, flags=re.IGNORECASE)
         message = message_match.group(1).strip() if message_match else None
         if message:

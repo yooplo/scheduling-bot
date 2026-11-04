@@ -722,3 +722,19 @@ preserving duration. Choosing a slot rechecks overlaps. All-day conflicts retain
 manual date changes. Interpretation failures retain a draft for `retry` without
 retrying an ambiguous calendar write. Read-only /now and /calendars preserve
 drafts; other slash commands keep their existing replacement semantics.
+
+
+### Conversational review regressions
+
+- While a clarification about Dinner is pending, a new named request such as
+  `move Dental to Friday at 4pm`, `set a reminder 30 minutes before Dental`, or
+  `delete Dental` replaces that question and uses normal matching/confirmation.
+  Short date/time/lead-time answers still target the retained event. Switching
+  action types also leaves the old question rather than interpreting a new
+  edit or deletion as a reminder lead time.
+- Confirmed media suggestions retain their source details through conflict
+  Change time and suggested-slot rechecks. Source `add anyway` control phrases
+  cannot bypass an overlap warning, including after a time change.
+- `change it to last 3 hours` and duration changes after selecting an ambiguous
+  event preserve the requested duration. Clock/duration preservation applies
+  only when the request does not explicitly supply a new time or duration.

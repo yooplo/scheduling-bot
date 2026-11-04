@@ -385,3 +385,137 @@ async def test_cancel_during_media_event_parsing_cannot_restore_or_create(flow, 
     assert 123 not in main.media_previews
     assert 123 not in main.pending_event_drafts
     calendar.create_event.assert_not_called()
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("pending_kind", ["edit", "remind"])
+@pytest.mark.parametrize("replacement", ["edit", "remind", "delete"])
+async def test_named_request_replaces_pending_followup_without_touching_old_event(flow, pending_kind, replacement):
+    send, _, _, _, calendar, parser = flow
+    await send("Dinner on 12 October 2030 7–9pm")
+    dinner = main.recent_events[123].events[0]
+    valid_edit = parser.parse_edit.side_effect
+    if pending_kind == "edit":
+        parser.parse_edit.side_effect = lambda *args: valid_edit(*args).model_copy(update={"confidence": "low"})
+        await send("move it to Friday evening")
+    else:
+        parser.parse_reminder_for_event.return_value = ParsedReminder(reminder_minutes=60, confidence="low")
+        await send("remind me before it")
+    assert main.pending_actions[123].action == f"followup_{pending_kind}"
+    dental = dinner.model_copy(update={"event_id": "dental", "title": "Dental"})
+    calendar.list_events.return_value = [dinner, dental]
+    from app.models import DeleteMatch
+    parser.match_event.return_value = DeleteMatch(matched_event_id="dental", ambiguous=False)
+    parser.parse_edit.side_effect = valid_edit
+    parser.parse_reminder_for_event.return_value = ParsedReminder(reminder_minutes=30, confidence="high")
+    parser.parse_edit.reset_mock()
+    parser.parse_reminder_for_event.reset_mock()
+
+    request = {"edit": "move Dental to Friday at 4pm", "remind": "set a reminder 30 minutes before Dental",
+               "delete": "delete Dental"}[replacement]
+    await send(request)
+    if replacement == "edit":
+        assert calendar.update_event.call_args.args[0].event_id == "dental"
+        assert parser.parse_edit.call_args.args[0] == request
+        calendar.set_reminder.assert_not_called()
+    elif replacement == "remind":
+        assert calendar.set_reminder.call_args.args[0].event_id == "dental"
+        assert parser.parse_reminder_for_event.call_args.args[0] == request
+        calendar.update_event.assert_not_called()
+    else:
+        assert main.pending_actions[123].action == "delete_confirm"
+        assert main.pending_actions[123].events[0].event_id == "dental"
+        calendar.update_event.assert_not_called()
+        calendar.set_reminder.assert_not_called()
+    calendar.delete_event_with_undo.assert_not_called()
+
+
+@pytest.mark.asyncio
+async def test_reminder_clarification_answer_keeps_pending_event(flow):
+    send, _, _, _, calendar, parser = flow
+    await send("Dinner on 12 October 2030 7–9pm")
+    parser.parse_reminder_for_event.return_value = ParsedReminder(reminder_minutes=60, confidence="low")
+    await send("remind me before it")
+    parser.parse_reminder_for_event.return_value = ParsedReminder(reminder_minutes=30, confidence="high")
+    await send("30 minutes before")
+    assert calendar.set_reminder.call_args.args[0].event_id == "dinner"
+    parser.match_event.assert_not_called()
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("lead_text,lead_minutes", [("15 minutes", 15), ("one hour", 60)])
+async def test_media_conflict_change_time_retains_details_without_overlap_override(flow, lead_text, lead_minutes):
+    send, media, settings, telegram, calendar, parser = flow
+    source = f"Dinner every Saturday on 12 October 2030 7–9pm at La Pasta in Work calendar, remind me {lead_text} before to bring ID"
+    parser.suggest_media_event.return_value = MediaEventSuggestion(event_text=source)
+    parser.parse_event.return_value = parser.parse_event.return_value.model_copy(update={"calendar_name": "Work", "reminder_minutes": lead_minutes})
+    await media()
+    preview = main.media_previews[123]
+    # Even a control phrase in the retained source must never skip confirmation's conflict check.
+    preview.request_text += "\nUser follow-up: add anyway"
+    original = preview.event
+    calendar._list_events_between.return_value = [CalendarEvent(event_id="busy", title="Busy", start=original.start, end=original.end)]
+    await main.handle_media_callback(123, "cb", f"media:{preview.token}:add", settings, telegram, calendar)
+    calendar.create_event.assert_not_called()
+    conflict = main.pending_event_conflicts[123]
+    await main.handle_conflict_callback(123, "cb", f"conflict:{conflict.token}:change", settings, telegram, calendar)
+
+    def parse_changed(text, *args):
+        for detail in ("Dinner", "La Pasta", "Work", "every Saturday", f"{lead_text} before", "bring ID"):
+            assert detail in text
+        assert "add anyway" not in text.lower()
+        assert "13 October 2030" in text
+        return ParsedEventDraft(**original.model_dump(exclude={"action"})).model_copy(update={
+            "start": original.start + timedelta(days=1), "end": original.end + timedelta(days=1)})
+
+    parser.parse_event.side_effect = parse_changed
+    await send("13 October 2030 7–9pm")
+    calendar.create_event.assert_called_once()
+    saved = calendar.create_event.call_args.args[0]
+    assert (saved.title, saved.location, saved.calendar_name, saved.recurrence) == (
+        original.title, original.location, original.calendar_name, original.recurrence)
+    assert [(reminder.minutes_before, reminder.message) for reminder in saved.reminders] == [
+        (reminder.minutes_before, reminder.message) for reminder in original.reminders]
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("selection", [False, True])
+@pytest.mark.parametrize("duration_text,minutes", [("last 3 hours", 180), ("last 45 minutes", 45), ("last one hour", 60), ("last 90min", 90), ("last 1.5hours", 90), ("last 3h", 180)])
+async def test_explicit_duration_edit_survives_context_and_selection(flow, selection, duration_text, minutes):
+    send, _, _, _, calendar, parser = flow
+    await send("Dinner on 12 October 2030 7–9pm")
+    original = main.recent_events[123].events[0]
+    if selection:
+        calendar.list_events.return_value = [original, original.model_copy(update={"event_id": "other", "title": "Other"})]
+        await send("list")
+    parser.parse_edit.side_effect = lambda text, event, tz: ParsedEdit(title=event.title, location=event.location,
+        start=event.start, end=event.start + timedelta(minutes=minutes), confidence="high")
+    await send(f"change it to {duration_text}")
+    if selection:
+        await send("first")
+    target, edited = calendar.update_event.call_args.args
+    assert target.event_id == "dinner"
+    assert edited.start == original.start
+    assert edited.end - edited.start == timedelta(minutes=minutes)
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("title,new_request", [
+    ("Dental", "remind me Dental 30 minutes before"),
+    ("An Evening with Amelia", "set a reminder 30 minutes before An Evening with Amelia"),
+    ("123 Workshop", "set a reminder 30 minutes before 123 Workshop"),
+])
+async def test_named_reminders_on_either_side_of_lead_time_replace_followup(flow, title, new_request):
+    send, _, _, _, calendar, parser = flow
+    await send("Dinner on 12 October 2030 7–9pm")
+    dinner = main.recent_events[123].events[0]
+    parser.parse_reminder_for_event.return_value = ParsedReminder(reminder_minutes=60, confidence="low")
+    await send("remind me before it")
+    target = dinner.model_copy(update={"event_id": "target", "title": title})
+    calendar.list_events.return_value = [dinner, target]
+    from app.models import DeleteMatch
+    parser.match_event.return_value = DeleteMatch(matched_event_id="target", ambiguous=False)
+    parser.parse_reminder_for_event.return_value = ParsedReminder(reminder_minutes=30, confidence="high")
+    await send(new_request)
+    assert calendar.set_reminder.call_args.args[0].event_id == "target"
+    assert parser.parse_reminder_for_event.call_args.args[0] == new_request
