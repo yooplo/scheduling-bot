@@ -22,7 +22,6 @@ Deterministic routing handles commands, common reminder forms, calendar manageme
 
 **Non-goals (v1)**
 - Open registration, dynamic account linking, or more than two configured users
-- Voice message input
 - Attendee invitations, arbitrary recurrence rules, and general undo (only a recently deleted one-off event can be restored with a five-minute bot shortcut)
 
 ## 3. Architecture
@@ -567,6 +566,37 @@ unconfirmed. This change removes the single-attempt failure mode.
   (`https://www.googleapis.com/auth/calendar`), not broader Google
   account access
 - An External Google OAuth app left in Testing issues Calendar refresh tokens with a seven-day lifetime; the deployed app must use a valid production-status authorization or renew expired/revoked tokens.
+
+### 11.1 Photo and voice input
+
+Implemented behavior (covered by mocked regression tests in `tests/test_media.py`;
+live media integrations have not been verified):
+- Authorized private chats accept Telegram photos (JPEG) and voice notes (OGG);
+  groups never download or interpret media. Image documents, audio files, albums
+  as one request, and video are outside this scope. Each album photo is separate.
+- Download media from Telegram into bounded memory only (4 MiB photos,
+  10 MiB voice; voice duration at most 120 seconds). Reject oversized files
+  before download where metadata permits, and enforce the byte limit while streaming.
+- Use the existing Groq key with independently configurable `GROQ_VISION_MODEL`
+  (default `meta-llama/llama-4-scout-17b-16e-instruct`) and
+  `GROQ_TRANSCRIPTION_MODEL` (default `whisper-large-v3-turbo`). Photo captions
+  guide interpretation; default to describing the image and extracting visible
+  event details without inventing dates, times, or scheduling commands. Voice
+  notes are transcribed verbatim. Results are limited to 3000 characters.
+- Show the interpreted text without calendar or reminder operations. The user
+  may send corrected text normally, or reply exactly `use media` within five
+  minutes to route the preview through the existing text handler, including
+  clarification, conflict checks, permissions, and deletion confirmations.
+- Previews are per private chat, in memory, consumed before routing, replaced
+  by new media, dismissed by any other text or private action callback, and lost
+  on restart. `cancel` or `/cancel` dismisses a preview without writes. Expired
+  or absent `use media` requests ask for resubmission and cannot create events.
+  New media dismisses previous conversation prompts to avoid attaching media
+  text to unrelated pending actions. Failed interpretation leaves no preview.
+- Media is sent to Groq for processing; it is not persisted or logged by the
+  application. Download/provider errors produce a concise retry message without
+  logging token-bearing Telegram URLs or media content. Mocked tests do not
+  establish live model availability or deployment verification.
 
 ## 12. Build Milestones
 

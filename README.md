@@ -4,6 +4,23 @@ A private, webhook-based FastAPI service that combines deterministic command rou
 
 Include a location naturally when creating an event, for example: `Dinner at La Pasta Saturday 7–9pm`. Locations are shown in upcoming lists when provided.
 
+Send a **photo or voice note in private chat** to read an image or transcribe
+speech using Groq. Photo captions can guide extraction, such as “Read the
+appointment details.” Check the preview, then reply `use media` within five
+minutes to process it through the usual scheduling flow. You can instead send
+corrected text or `/cancel`. A preview alone makes no calendar or reminder
+changes. Example: voice note “Add dentist tomorrow 2 to 3pm” → transcript →
+`use media` → usual event creation/conflict checks.
+
+Photos must be at most 4 MiB; voice notes at most 10 MiB and two minutes.
+Only Telegram photos and voice notes are supported, rather than document or
+audio-file attachments. Each album photo is processed separately. Media goes to
+Groq for processing and is not saved by the application. New media clears prior
+conversation prompts; other text or private action buttons dismiss its preview.
+Previews are lost on restart. `GROQ_VISION_MODEL` and `GROQ_TRANSCRIPTION_MODEL`
+select the models; both use the existing `GROQ_API_KEY`. Live model access must
+be verified in deployment. Group chats retain text-only schedule access.
+
 Weekday names and abbreviations (`Mon` through `Sun`) work with AM/PM or 24-hour ranges: `Add Drills at TSA@JK on Mon 8-10pm` and `Add Drills at TSA@JK on Mon 20:00–22:00` both use the next matching Monday (including today), 8–10 PM. Saying `next Monday` on Monday means one week later. For overnight ranges, make both endpoints explicit, such as `11pm-1am` or `23:00-01:00`.
 
 If a weekday and date disagree, the bot asks which date to use before adding the event. For example, `Mon 10 October 2026 8-10pm` asks for clarification because that date is Saturday; reply `Mon` or `12 October 2026` to correct it. The draft retains the other details for five minutes; `/cancel` discards it. Numeric dates use day/month order (`12/10/2026`), while ISO dates (`2026-10-12`) also work. An ambiguous range such as `11-1am` asks you to specify both AM/PM markers.
@@ -91,7 +108,7 @@ Reminder wording determines whether a notification is independent or event-linke
 ## Current limitations
 
 - One or two preconfigured Telegram/Google accounts only. Each account can access and manage multiple calendars; adding users or changing linked accounts dynamically requires a database and web OAuth flow.
-- No voice-message transcription, attendee/invitation management, arbitrary user sign-up, or general undo action. Event and recurring-series deletions require confirmation. A deleted one-off event can be restored using its five-minute **Undo** button; recurring occurrences, whole series, calendars, and reminder removals have no bot undo.
+- No attendee/invitation management, arbitrary user sign-up, or general undo action. Event and recurring-series deletions require confirmation. A deleted one-off event can be restored using its five-minute **Undo** button; recurring occurrences, whole series, calendars, and reminder removals have no bot undo.
 - Only common weekly recurrence wording is supported; arbitrary recurrence schedules are not exposed as a dedicated command flow.
 - Scheduler-based reminders and daily agenda require the cron-job.org setup below; confirm successful `204` job runs before relying on them.
 

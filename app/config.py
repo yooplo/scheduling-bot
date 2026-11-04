@@ -42,6 +42,8 @@ class Settings:
     cron_job_api_key: str | None
     service_base_url: str | None
     telegram_group_id: int | None = None
+    groq_vision_model: str = "meta-llama/llama-4-scout-17b-16e-instruct"
+    groq_transcription_model: str = "whisper-large-v3-turbo"
 
     @property
     def timezone(self) -> ZoneInfo:
@@ -116,4 +118,6 @@ def get_settings() -> Settings:
         cron_job_api_key=os.getenv("CRON_JOB_API_KEY", "").strip() or None,
         service_base_url=os.getenv("SERVICE_BASE_URL", "").strip().rstrip("/") or None,
         telegram_group_id=group_id,
+        groq_vision_model=os.getenv("GROQ_VISION_MODEL", "meta-llama/llama-4-scout-17b-16e-instruct"),
+        groq_transcription_model=os.getenv("GROQ_TRANSCRIPTION_MODEL", "whisper-large-v3-turbo"),
     )
