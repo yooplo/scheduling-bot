@@ -752,6 +752,11 @@ async def handle_message(chat_id, text, settings, telegram, calendar, parser, cr
         context = store.get(chat_id)
         if context and context.expires_at <= time.monotonic():
             store.pop(chat_id, None)
+    if chat_id in media_requests:
+        management_action = "followup_remind" if _is_existing_reminder_request(lower) else "followup_edit"
+        if _replaces_pending_followup(text, management_action):
+            for store in (media_requests, media_previews, pending_event_drafts):
+                store.pop(chat_id, None)
     if media_requests.get(chat_id, float("inf")) <= time.monotonic():
         media_requests.pop(chat_id, None)
         media_previews.pop(chat_id, None)
@@ -1336,12 +1341,17 @@ async def handle_conflict_callback(chat_id, callback_id, data, settings, telegra
         return
     # Consume before awaiting so repeated taps cannot create the same draft twice.
     pending_event_conflicts.pop(chat_id, None)
-    if callback_id:
-        await telegram.answer_callback_query(callback_id)
     action = match.group(2)
     if action == "suggest":
-        await _suggest_conflict_times(chat_id, pending, telegram, calendar)
+        lookup_token = uuid4().hex
+        pending.token = lookup_token
+        pending_event_conflicts[chat_id] = pending
+        if callback_id:
+            await telegram.answer_callback_query(callback_id)
+        await _suggest_conflict_times(chat_id, pending, telegram, calendar, lookup_token)
         return
+    if callback_id:
+        await telegram.answer_callback_query(callback_id)
     if action.startswith("slot:"):
         index = int(action[-1])
         if index >= len(pending.suggestions):
@@ -1377,14 +1387,33 @@ async def handle_conflict_callback(chat_id, callback_id, data, settings, telegra
         await _create_event(chat_id, pending.event, telegram, calendar)
 
 
-async def _suggest_conflict_times(chat_id, pending, telegram, calendar):
+async def _suggest_conflict_times(chat_id, pending, telegram, calendar, lookup_token):
+    def is_current():
+        if pending_event_conflicts.get(chat_id) is not pending or pending.token != lookup_token:
+            return False
+        if pending.expires_at <= time.monotonic():
+            pending_event_conflicts.pop(chat_id, None)
+            return False
+        return True
+
+    if not is_current():
+        return
     if pending.event.all_day:
+        pending_event_conflicts.pop(chat_id, None)
         await telegram.send_message(chat_id, "Please choose another date for this all-day event.")
         return
     start = max(pending.event.end, datetime.now(pending.event.start.tzinfo))
     horizon = start + timedelta(days=7)
     duration = pending.event.end - pending.event.start
-    events = await asyncio.to_thread(calendar._list_events_between, start, horizon)
+    try:
+        events = await asyncio.to_thread(calendar._list_events_between, start, horizon)
+    except Exception:
+        if is_current():
+            pending_event_conflicts.pop(chat_id, None)
+            raise
+        return
+    if not is_current():
+        return
     occupied = sorted((event for event in events if not pending.existing or
                        (event.event_id, event.calendar_id) != (pending.existing.event_id, pending.existing.calendar_id)), key=lambda event: event.start)
     choices = []
@@ -1397,6 +1426,7 @@ async def _suggest_conflict_times(chat_id, pending, telegram, calendar):
         choices.append(pending.event.model_copy(update={"start": candidate, "end": candidate + duration}))
         candidate += duration
     if not choices:
+        pending_event_conflicts.pop(chat_id, None)
         await telegram.send_message(chat_id, "I couldn't find another slot of that length in the next 7 days. Try a different date or duration.")
         return
     pending.token = uuid4().hex

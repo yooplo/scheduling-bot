@@ -708,3 +708,156 @@ async def test_latest_edit_clarification_replaces_retained_range(flow, answer, h
     assert (edited.start.day, edited.start.hour, edited.end.day, edited.end.hour) == (day, hour, day, end_hour)
     assert edited.location == original.location
     assert answer in parser.parse_edit.call_args.args[0]
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("media_state", ["preview", "draft", "expired"])
+@pytest.mark.parametrize("action", ["edit", "remind", "delete"])
+async def test_named_management_request_replaces_media_state(flow, media_state, action):
+    send, media, settings, telegram, calendar, parser = flow
+    complete = parser.parse_event.return_value
+    if media_state == "draft":
+        parser.suggest_media_event.return_value = MediaEventSuggestion(event_text="Dinner tomorrow 7pm")
+        parser.parse_event.return_value = complete.model_copy(update={"end": None, "confidence": "low", "missing_fields": ["duration"]})
+    await media()
+    preview = main.media_previews.get(123)
+    if media_state == "expired":
+        main.media_requests[123] = 0
+        preview.expires_at = 0
+    parser.parse_event.return_value = complete
+    dental = CalendarEvent(event_id="dental", calendar_id="personal", title="Dental", start=complete.start, end=complete.end)
+    calendar.list_events.return_value = [dental]
+    from app.models import DeleteMatch
+    parser.match_event.return_value = DeleteMatch(matched_event_id="dental", ambiguous=False)
+    message = {"edit": "move Dental to Friday at 4pm", "remind": "set a reminder 30 minutes before Dental",
+               "delete": "delete Dental"}[action]
+    await send(message)
+    assert 123 not in main.media_requests
+    assert 123 not in main.media_previews
+    assert 123 not in main.pending_event_drafts
+    if action == "edit":
+        assert calendar.update_event.call_args.args[0].event_id == "dental"
+        assert parser.parse_edit.call_args.args[0] == message
+    elif action == "remind":
+        assert calendar.set_reminder.call_args.args[0].event_id == "dental"
+        assert parser.parse_reminder_for_event.call_args.args[0] == message
+    else:
+        assert main.pending_actions[123].action == "delete_confirm"
+        assert main.pending_actions[123].events[0].event_id == "dental"
+    if preview:
+        await main.handle_media_callback(123, "cb", f"media:{preview.token}:add", settings, telegram, calendar)
+    calendar.create_event.assert_not_called()
+    calendar.delete_event_with_undo.assert_not_called()
+
+
+@pytest.mark.asyncio
+async def test_unqualified_reminder_is_still_a_media_correction(flow):
+    send, media, _, _, calendar, parser = flow
+    await media()
+    await send("remind me 15 minutes before")
+    assert main.media_previews[123].event.reminders[0].minutes_before == 15
+    calendar.create_event.assert_not_called()
+    calendar.set_reminder.assert_not_called()
+    parser.match_event.assert_not_called()
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("replacement", ["cancel", "new_conflict", "new_saved", "new_lookup", "expired"])
+@pytest.mark.parametrize("read_failure", [False, True])
+async def test_slow_slot_lookup_cannot_restore_superseded_conflict(flow, replacement, read_failure):
+    import threading
+    send, _, settings, telegram, calendar, parser = flow
+    complete = parser.parse_event.return_value
+    busy = CalendarEvent(event_id="busy", title="Busy", start=complete.start, end=complete.end)
+    calendar._list_events_between.return_value = [busy]
+    await send("Dinner on 12 October 2030 7–9pm")
+    original = main.pending_event_conflicts[123]
+    old_token = original.token
+    started, finish = threading.Event(), threading.Event()
+    calls = [0]
+
+    def read_slots(*args):
+        calls[0] += 1
+        if calls[0] == 1:
+            started.set()
+            finish.wait(timeout=5)
+            if read_failure:
+                raise RuntimeError("calendar temporarily unavailable")
+            return []
+        return [busy] if replacement == "new_conflict" else []
+
+    calendar._list_events_between.side_effect = read_slots
+    task = asyncio.create_task(main.handle_conflict_callback(123, "cb", f"conflict:{old_token}:suggest", settings, telegram, calendar))
+    expected = None
+    expected_token = None
+    try:
+        assert await asyncio.to_thread(started.wait, 2)
+        if replacement == "cancel":
+            await send("cancel")
+        elif replacement in {"new_conflict", "new_saved"}:
+            parser.parse_event.return_value = complete.model_copy(update={"title": "Lunch"})
+            await send("add Lunch on 12 October 2030 7–9pm")
+            expected = main.pending_event_conflicts.get(123)
+            expected_token = expected.token if expected else None
+        elif replacement == "new_lookup":
+            await send("suggest times")
+            expected = main.pending_event_conflicts[123]
+            expected_token = expected.token
+        else:
+            original.expires_at = 0
+    finally:
+        finish.set()
+        await task
+    if expected is not None:
+        assert main.pending_event_conflicts[123] is expected
+        assert main.pending_event_conflicts[123].token == expected_token
+    else:
+        assert 123 not in main.pending_event_conflicts
+    if replacement == "new_saved":
+        calendar.create_event.assert_called_once()
+        assert calendar.create_event.call_args.args[0].title == "Lunch"
+        assert main.pending_actions[123].events[0].title == "Lunch"
+    else:
+        calendar.create_event.assert_not_called()
+    if replacement != "new_lookup":
+        assert not any("Other available times for Dinner" in call.args[1] for call in telegram.send_message.call_args_list)
+
+
+@pytest.mark.asyncio
+async def test_cancel_during_slot_callback_acknowledgement_stops_lookup(flow):
+    send, _, settings, telegram, calendar, parser = flow
+    complete = parser.parse_event.return_value
+    calendar._list_events_between.return_value = [CalendarEvent(event_id="busy", title="Busy", start=complete.start, end=complete.end)]
+    await send("Dinner on 12 October 2030 7–9pm")
+    token = main.pending_event_conflicts[123].token
+    started, finish = asyncio.Event(), asyncio.Event()
+
+    async def acknowledge(*args):
+        started.set()
+        await finish.wait()
+
+    telegram.answer_callback_query.side_effect = acknowledge
+    task = asyncio.create_task(main.handle_conflict_callback(123, "cb", f"conflict:{token}:suggest", settings, telegram, calendar))
+    await started.wait()
+    try:
+        await send("cancel")
+    finally:
+        finish.set()
+        await task
+    assert 123 not in main.pending_event_conflicts
+    calendar._list_events_between.assert_called_once()
+    calendar.create_event.assert_not_called()
+
+
+@pytest.mark.asyncio
+async def test_failed_current_slot_lookup_clears_reserved_conflict(flow):
+    send, _, settings, telegram, calendar, parser = flow
+    complete = parser.parse_event.return_value
+    calendar._list_events_between.return_value = [CalendarEvent(event_id="busy", title="Busy", start=complete.start, end=complete.end)]
+    await send("Dinner on 12 October 2030 7–9pm")
+    token = main.pending_event_conflicts[123].token
+    calendar._list_events_between.side_effect = RuntimeError("calendar temporarily unavailable")
+    with pytest.raises(RuntimeError, match="temporarily unavailable"):
+        await main.handle_conflict_callback(123, "cb", f"conflict:{token}:suggest", settings, telegram, calendar)
+    assert 123 not in main.pending_event_conflicts
+    calendar.create_event.assert_not_called()

@@ -756,3 +756,13 @@ drafts; other slash commands keep their existing replacement semantics.
   latest answer supplying each detail, just like creation drafts. A correction
   to noon, a single clock, a new range, or a duration replaces an earlier range;
   date corrections replace the earlier date without dropping unrelated details.
+
+- Fresh named management requests replace ready, incomplete, or expired media
+  suggestions and use ordinary matching/confirmation. For example, Dinner's
+  media draft followed by `move Dental to Friday at 4pm` edits Dental. A bare
+  lead-time correction still updates the proposed event and requires Add event.
+- Suggest-times callbacks reserve a fresh generation token before acknowledging
+  the callback or querying availability. Results are published only while that
+  same pending conflict, token, and expiry remain current. Cancellation, new
+  requests, a newer lookup, and expiry invalidate earlier work; stale lookups
+  cannot restore state, overwrite a newer prompt, or publish actionable buttons.
