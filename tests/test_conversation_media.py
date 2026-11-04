@@ -519,3 +519,101 @@ async def test_named_reminders_on_either_side_of_lead_time_replace_followup(flow
     await send(new_request)
     assert calendar.set_reminder.call_args.args[0].event_id == "target"
     assert parser.parse_reminder_for_event.call_args.args[0] == new_request
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("context", ["none", "saved", "followup"])
+@pytest.mark.parametrize("action", ["edit", "remind", "delete"])
+@pytest.mark.parametrize("title", ["Bring It On", "It Takes Two", "That Show", "The Second One Rehearsal"])
+async def test_titles_containing_references_use_named_event_matching(flow, context, action, title):
+    send, _, _, _, calendar, parser = flow
+    dinner = CalendarEvent(event_id="dinner", calendar_id="personal", title="Dinner",
+        start="2030-10-12T19:00:00+08:00", end="2030-10-12T21:00:00+08:00")
+    if context != "none":
+        await send("Dinner on 12 October 2030 7–9pm")
+        dinner = main.recent_events[123].events[0]
+    if context == "followup":
+        parser.parse_reminder_for_event.return_value = ParsedReminder(reminder_minutes=60, confidence="low")
+        await send("remind me before it")
+        assert main.pending_actions[123].action == "followup_remind"
+    target = dinner.model_copy(update={"event_id": "named", "title": title})
+    calendar.list_events.return_value = [dinner, target]
+    from app.models import DeleteMatch
+    parser.match_event.return_value = DeleteMatch(matched_event_id="named", ambiguous=False)
+    parser.parse_reminder_for_event.return_value = ParsedReminder(reminder_minutes=30, confidence="high")
+    message = {"edit": f"move {title} to Friday at 4pm", "remind": f"set a reminder 30 minutes before {title}",
+               "delete": f"delete {title}"}[action]
+    await send(message)
+    if action == "edit":
+        assert calendar.update_event.call_args.args[0].event_id == "named"
+        assert parser.match_event.call_args.args[0] == message
+        calendar.set_reminder.assert_not_called()
+    elif action == "remind":
+        assert calendar.set_reminder.call_args.args[0].event_id == "named"
+        assert parser.match_event.call_args.args[0] == message
+        calendar.update_event.assert_not_called()
+    else:
+        assert main.pending_actions[123].action == "delete_confirm"
+        assert main.pending_actions[123].events[0].event_id == "named"
+        calendar.update_event.assert_not_called()
+        calendar.set_reminder.assert_not_called()
+    calendar.delete_event_with_undo.assert_not_called()
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("word,hour", [("noon", 12), ("midnight", 0), ("midday", 12)])
+@pytest.mark.parametrize("selection", [False, True])
+async def test_word_clock_corrections_keep_parsed_time(flow, word, hour, selection):
+    send, _, _, _, calendar, parser = flow
+    await send("Dinner on 12 October 2030 7–9pm")
+    dinner = main.recent_events[123].events[0]
+    if selection:
+        calendar.list_events.return_value = [dinner, dinner.model_copy(update={"event_id": "other", "title": "Other"})]
+        await send("list")
+    start = dinner.start.replace(hour=hour)
+    parser.parse_edit.side_effect = lambda *args: ParsedEdit(title=dinner.title, location=dinner.location,
+        start=start, end=start + (dinner.end - dinner.start), confidence="high")
+    await send(f"make it {word}")
+    if selection:
+        await send("first")
+    target, edited = calendar.update_event.call_args.args
+    assert target.event_id == "dinner"
+    assert edited.start == start
+    assert edited.end - edited.start == dinner.end - dinner.start
+    assert edited.location == dinner.location
+
+
+@pytest.mark.asyncio
+async def test_ordinal_in_new_details_does_not_replace_pronoun_target(flow):
+    send, _, _, _, calendar, _ = flow
+    await send("Dinner on 12 October 2030 7–9pm")
+    dinner = main.recent_events[123].events[0]
+    calendar.list_events.return_value = [dinner, dinner.model_copy(update={"event_id": "other", "title": "Other"})]
+    await send("list")
+    await send("move it to 4pm at The Second One")
+    assert main.pending_actions[123].action == "edit"
+    await send("first")
+    assert calendar.update_event.call_args.args[0].event_id == "dinner"
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("message", ["set a reminder for it 30 minutes before", "remind me 30 minutes before it"])
+async def test_exact_reminder_pronoun_retains_saved_target(flow, message):
+    send, _, _, _, calendar, parser = flow
+    await send("Dinner on 12 October 2030 7–9pm")
+    await send(message)
+    assert calendar.set_reminder.call_args.args[0].event_id == "dinner"
+    parser.match_event.assert_not_called()
+
+
+@pytest.mark.asyncio
+async def test_media_word_clock_correction_supersedes_original_numeric_range(flow):
+    send, media, _, _, calendar, parser = flow
+    await media()
+    original = main.media_previews[123].event
+    start = original.start.replace(hour=12)
+    parser.parse_event.return_value = ParsedEventDraft(**original.model_dump(exclude={"action"})).model_copy(
+        update={"start": start, "end": start + timedelta(hours=2)})
+    await send("actually noon")
+    assert main.media_previews[123].event.start == start
+    calendar.create_event.assert_not_called()

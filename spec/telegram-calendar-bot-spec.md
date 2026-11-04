@@ -738,3 +738,12 @@ drafts; other slash commands keep their existing replacement semantics.
 - `change it to last 3 hours` and duration changes after selecting an ambiguous
   event preserve the requested duration. Clock/duration preservation applies
   only when the request does not explicitly supply a new time or duration.
+
+- Context references are matched as event target phrases, not words embedded
+  in explicit titles. `move Bring It On to Friday at 4pm`, `delete It Takes Two`,
+  and reminders for `That Show` use ordinary named matching whether context is
+  absent, recently saved, or awaiting clarification. Ordinal references also
+  apply only to the target, not an ordinal appearing in a title or new details.
+- Explicit word clocks (`noon`, `midnight`, `midday`) keep their parsed times
+  through contextual edits, event selection, and media corrections. Date-only edits continue to
+  preserve the event's existing clocks and duration.

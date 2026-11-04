@@ -37,7 +37,8 @@ MONTH_NAMES = r"jan(?:uary)?|feb(?:ruary)?|mar(?:ch)?|apr(?:il)?|may|jun(?:e)?|j
 NAMED_DATE_PATTERN = rf"\b(\d{{1,2}})(?:st|nd|rd|th)?\s+({MONTH_NAMES})(?:\s+(\d{{4}}))?\b"
 NUMERIC_DATE_PATTERN = r"\b(?:(\d{4})-(\d{1,2})-(\d{1,2})|(\d{1,2})[-/](\d{1,2})(?:[-/](\d{4}))?)\b(?![-/]\d)"
 DATE_HINT_PATTERN = rf"\b(?:{WEEKDAY_NAMES}|{MONTH_NAMES}|today|tonight|tomorrow|tmr|next|this|last|following|after|before|weeks?|months?)\b|{NUMERIC_DATE_PATTERN}"
-TIME_HINT_PATTERN = r"\b\d{1,2}[:.]\d{2}|\b\d{1,2}\s*(?:am|pm)\b|\b(?:all|whole)[\s-]+day\b|\b(?:hours?|minutes?|hrs?|mins?|until|till|duration)\b"
+WORD_CLOCK_PATTERN = r"\b(?:noon|midnight|midday)\b"
+TIME_HINT_PATTERN = r"\b\d{1,2}[:.]\d{2}|\b\d{1,2}\s*(?:am|pm)\b|\b(?:all|whole)[\s-]+day\b|\b(?:hours?|minutes?|hrs?|mins?|until|till|duration)\b" + "|" + WORD_CLOCK_PATTERN
 CLOCK_RANGE_PATTERN = re.compile(
     r"\b(\d{1,2})(?:[:.](\d{2}))?\s*(am|pm)?\s*[-–—]\s*(\d{1,2})(?:[:.](\d{2}))?\s*(am|pm)?\b",
     flags=re.IGNORECASE,
@@ -681,6 +682,32 @@ def _read_only_request(text):
             or bool(re.match(r"^(?:list|upcoming|schedule|plans|what(?:'s|s| are)|show (?:my |the )?(?:schedule|events))\b", lower)))
 
 
+def _event_reference(text: str) -> str | None:
+    """Return a contextual target only when the entire target is a reference."""
+    lowered = text.lower().strip()
+    if _is_existing_reminder_request(lowered) or "reminder" in lowered:
+        target_match = re.search(r"\b(?:before|for|about)\s+(.+)$", lowered)
+        if target_match:
+            target = target_match.group(1)
+        else:
+            command = re.match(r"^(?:remind me|(?:set|add|change|update|edit)(?: (?:a|the|another))? reminder)\s+(.+)$", lowered)
+            if not command:
+                return None
+            target = command.group(1)
+        # A target may precede its lead time: 'remind me about it one hour before'.
+        target = re.split(r"\s+(?:\d+(?:\.\d+)?|an?|one|two|three|half|quarter|the)\s*(?:minutes?|mins?|hours?|hrs?|days?) before\b", target, maxsplit=1)[0]
+    else:
+        command = re.match(r"^(change|edit|move|reschedule|update|delete|remove|cancel|disable)\s+(.+)$", lowered)
+        if not command:
+            return None
+        target = command.group(2)
+        if command.group(1) in EDIT_WORDS:
+            target = re.split(r"\s+to\s+", target, maxsplit=1)[0]
+    target = target.strip()
+    pattern = r"(?:it|that|this event|that event|this series|that series|the series|the (?:first|second|third|fourth|fifth|last|\d+(?:st|nd|rd|th)?) (?:one|event))"
+    return target if re.fullmatch(pattern, target) else None
+
+
 def _replaces_pending_followup(text: str, action: str) -> bool:
     """Separate a new event command from details answering the open question."""
     lowered = text.lower().strip()
@@ -689,7 +716,7 @@ def _replaces_pending_followup(text: str, action: str) -> bool:
     if _is_existing_reminder_request(lowered):
         if action != "followup_remind":
             return True
-        if re.search(r"\b(?:before|for|about)\s+(?:it|that|this event|the event)(?:\s|$)", lowered):
+        if _event_reference(text):
             return False
         prefix = r"(?:remind me|(?:set|add|change|update|edit)(?: (?:a|the|another))? reminder)"
         lead_time = r"(?:\d+(?:\.\d+)?|an?|one|two|three|half|quarter|the)\s*(?:minutes?|mins?|hours?|hrs?|days?) before"
@@ -787,7 +814,7 @@ async def handle_message(chat_id, text, settings, telegram, calendar, parser, cr
             return
     actionable_pending = pending and pending.action not in {"created", "undo_delete"} and pending.expires_at > time.monotonic()
     if not draft and not actionable_pending and not pending_event_conflicts.get(chat_id):
-        reference = re.search(r"\b(?:it|that|this event|that event|this series|that series|the series|the (?:first|second|third|fourth|fifth|last|\d+(?:st|nd|rd|th)?) (?:one|event))\b", lower)
+        reference = _event_reference(text)
         reminder = _is_existing_reminder_request(lower) and not _is_standalone_reminder_request(lower)
         implicit_reminder = reminder and bool(re.fullmatch(r"(?:remind me|(?:set|add)(?: another| a)? reminder) (?:an? |one |\d+ )?(?:hour|day|minute)s? before", lower))
         clear_reminder = "reminder" in lower and bool(re.match(r"^(?:remove|delete|disable|cancel)\b", lower))
@@ -798,7 +825,7 @@ async def handle_message(chat_id, text, settings, telegram, calendar, parser, cr
             contexts = [item for item in (recent_events.get(chat_id), recent_event_lists.get(chat_id)) if item]
             context = max(contexts, key=lambda item: item.expires_at, default=None)
             choices = list(context.events) if context else []
-            ordinal = re.search(r"\bthe (first|second|third|fourth|fifth|last|\d+)(?:st|nd|rd|th)? (?:one|event)\b", lower)
+            ordinal = re.fullmatch(r"the (first|second|third|fourth|fifth|last|\d+)(?:st|nd|rd|th)? (?:one|event)", reference or "")
             if ordinal:
                 context = recent_event_lists.get(chat_id)
                 choices = list(context.events) if context else []
@@ -1826,6 +1853,7 @@ def _has_explicit_event_time(text: str) -> bool:
         re.search(r"\b\d{1,2}(?::|\.)\d{2}\s*(?:am|pm)?\b", lowered)
         or re.search(r"\b\d{1,2}\s*(?:am|pm)\b", lowered)
         or re.search(r"\b(?:at|from)\s+\d{1,2}\s+(?:to|until|till|-)\s+\d{1,2}\b", lowered)
+        or re.search(WORD_CLOCK_PATTERN, lowered)
     )
 
 
