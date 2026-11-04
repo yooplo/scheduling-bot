@@ -766,3 +766,9 @@ drafts; other slash commands keep their existing replacement semantics.
   same pending conflict, token, and expiry remain current. Cancellation, new
   requests, a newer lookup, and expiry invalidate earlier work; stale lookups
   cannot restore state, overwrite a newer prompt, or publish actionable buttons.
+
+- Photo/voice interpretation returns only its own request's preview marker;
+  the event-suggestion stage verifies that marker still owns the chat before
+  using it. A superseded interpretation returns no result and cannot adopt a
+  newer message's extraction or combine it with an older caption, including
+  when replacement happens during preview delivery or event extraction.

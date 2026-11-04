@@ -861,3 +861,60 @@ async def test_failed_current_slot_lookup_clears_reserved_conflict(flow):
         await main.handle_conflict_callback(123, "cb", f"conflict:{token}:suggest", settings, telegram, calendar)
     assert 123 not in main.pending_event_conflicts
     calendar.create_event.assert_not_called()
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("old_kind,new_kind", [("photo", "photo"), ("photo", "voice"), ("voice", "photo"), ("voice", "voice")])
+@pytest.mark.parametrize("old_block_stage", ["interpretation", "preview_delivery"])
+async def test_overlapping_media_never_adopts_another_requests_preview(flow, old_kind, new_kind, old_block_stage, monkeypatch):
+    import threading
+    _, media, _, telegram, calendar, parser = flow
+    old_started, finish_old = asyncio.Event(), asyncio.Event()
+    new_started, finish_new = threading.Event(), threading.Event()
+    complete = parser.parse_event.return_value
+
+    def message(kind, caption):
+        content = {"file_id": caption}
+        return {kind: [content] if kind == "photo" else content, "caption": caption}
+
+    async def interpret(data, kind, caption, settings):
+        if caption == "OLD CAPTION" and old_block_stage == "interpretation":
+            old_started.set()
+            await finish_old.wait()
+        return "OLD DETAILS" if caption == "OLD CAPTION" else "NEW DETAILS"
+
+    async def deliver(chat_id, text, *args, **kwargs):
+        if "OLD DETAILS" in text and old_block_stage == "preview_delivery":
+            old_started.set()
+            await finish_old.wait()
+
+    def suggest(content, *args):
+        if "NEW CAPTION" in content:
+            new_started.set()
+            finish_new.wait(timeout=5)
+            return MediaEventSuggestion(event_text="New appointment on 12 October 2030 7–9pm")
+        return MediaEventSuggestion(event_text="Mixed old caption on 12 October 2030 7–9pm")
+
+    monkeypatch.setattr(main, "interpret_media", AsyncMock(side_effect=interpret))
+    telegram.send_message.side_effect = deliver
+    parser.suggest_media_event.side_effect = suggest
+    parser.parse_event.side_effect = lambda text, *args: complete.model_copy(update={
+        "title": "New appointment" if "New appointment" in text else "Mixed old caption"})
+    old_task = asyncio.create_task(media(message(old_kind, "OLD CAPTION")))
+    await old_started.wait()
+    new_task = asyncio.create_task(media(message(new_kind, "NEW CAPTION")))
+    try:
+        assert await asyncio.to_thread(new_started.wait, 2)
+        finish_old.set()
+        await old_task
+        parser.suggest_media_event.assert_called_once()
+        content = parser.suggest_media_event.call_args.args[0]
+        assert "NEW DETAILS" in content and "NEW CAPTION" in content
+        assert "OLD CAPTION" not in content
+    finally:
+        finish_old.set()
+        finish_new.set()
+        await asyncio.gather(old_task, new_task)
+    assert main.media_previews[123].event.title == "New appointment"
+    assert "OLD CAPTION" not in main.media_previews[123].request_text
+    calendar.create_event.assert_not_called()

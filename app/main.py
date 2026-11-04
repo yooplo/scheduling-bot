@@ -263,7 +263,7 @@ async def webhook(request: Request, x_telegram_bot_api_secret_token: str | None 
     return {"ok": True}
 
 
-async def handle_media(chat_id: int, message: dict, settings: Settings, telegram: TelegramClient) -> None:
+async def handle_media(chat_id: int, message: dict, settings: Settings, telegram: TelegramClient) -> tuple[str, float] | None:
     # A new input invalidates both previous previews and unrelated pending actions.
     for store in (pending_media, pending_event_drafts, pending_event_conflicts,
                   pending_actions, pending_calendar_deletions, recent_reminder_lists):
@@ -290,6 +290,8 @@ async def handle_media(chat_id: int, message: dict, settings: Settings, telegram
         marker = (text, time.monotonic() + PENDING_TTL_SECONDS)
         pending_media[chat_id] = marker
         await telegram.send_message(chat_id, format_media_preview(text, photo=kind == "photo"), parse_mode="HTML")
+        if pending_media.get(chat_id) is marker:
+            return marker
     except Exception:
         # HTTP errors may include the bot token in the URL; do not log exceptions.
         if pending_media.get(chat_id) is marker:
@@ -593,9 +595,8 @@ async def handle_media_message(chat_id, message, settings, telegram, calendar, p
     original_preview = None
     try:
         if message.get("photo") or message.get("voice"):
-            await handle_media(chat_id, message, settings, telegram)
-            original_preview = pending_media.get(chat_id)
-            if not original_preview or not original_preview[0]:
+            original_preview = await handle_media(chat_id, message, settings, telegram)
+            if not original_preview or pending_media.get(chat_id) is not original_preview or not original_preview[0]:
                 return
             content = original_preview[0] + "\nCaption: " + (message.get("caption") or "")
         else:
