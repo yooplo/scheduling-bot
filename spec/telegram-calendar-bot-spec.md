@@ -732,6 +732,12 @@ drafts; other slash commands keep their existing replacement semantics.
   Short date/time/lead-time answers still target the retained event. Switching
   action types also leaves the old question rather than interpreting a new
   edit or deletion as a reminder lead time.
+  Explicit reminder targets include possessive and suffix forms such as
+  `change Dental's reminder to 30 minutes before`, `update its reminder to
+  30 minutes before`, `remove Dental reminder`, and `delete the reminder about
+  Dental`. These update or remove reminders without editing/deleting the event;
+  removal also searches independent reminders. A reminder word inside a quoted
+  title or a longer title such as `Dental Reminder Workshop` remains event data.
 - Confirmed media suggestions retain their source details through conflict
   Change time and suggested-slot rechecks. Source `add anyway` control phrases
   cannot bypass an overlap warning, including after a time change.

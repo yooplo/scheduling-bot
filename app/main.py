@@ -744,8 +744,28 @@ def _management_action(text: str) -> str | None:
     return "delete" if match[1].lower() in {*DELETE_WORDS, "disable"} else "edit"
 
 
+def _explicit_reminder_target(text: str, verbs: str) -> str | None:
+    """Recognize a reminder noun as the command object, outside quoted titles."""
+    command = re.match(rf"^(?:{verbs})\s+(.+)$", _command_text(text), flags=re.I)
+    if not command:
+        return None
+    body = command[1]
+    for noun in re.finditer(r"\breminders?\b", _instruction_text(body), flags=re.I):
+        before, after = body[:noun.start()].strip(), body[noun.end():].strip()
+        if before.lower() in {"", "a", "the", "all", "my"}:
+            if not after:
+                return ""
+            connector = re.match(r"^(for|about|on|from|of|to|before|at)\s+(.+)$", after, flags=re.I)
+            if connector:
+                return connector[2] if connector[1].lower() in {"for", "about", "on", "from", "of"} else ""
+        elif not after or re.match(r"^(?:to|before|at|on|for|from)\s+", after, flags=re.I):
+            target = re.sub(r"(?:['’]s|(?<=s)['’])$", "", before, flags=re.I)
+            return "it" if target.lower() == "its" else target
+    return None
+
+
 def _is_reminder_removal_request(text: str) -> bool:
-    return bool(re.match(r"^(?:delete|remove|cancel|disable)\s+(?:(?:the|a|all)\s+)?reminders?(?:\s+(?:for|on|from)\b|$)", _command_text(text), flags=re.I))
+    return _explicit_reminder_target(text, "delete|remove|cancel|disable") is not None
 
 
 def _clear_reminder_command(text: str) -> bool:
@@ -768,8 +788,11 @@ def _event_reference(text: str) -> str | None:
     """Return a contextual target only when the entire target is a reference."""
     lowered = _command_text(text).lower().strip()
     if _is_existing_reminder_request(lowered) or _is_reminder_removal_request(lowered):
+        explicit_target = _explicit_reminder_target(lowered, "set|add|change|edit|update|move|reschedule|delete|remove|cancel|disable")
         target_match = re.search(r"\b(?:before|for|about)\s+(.+)$", lowered)
-        if target_match:
+        if explicit_target:
+            target = re.split(r"\s+to\s+(?=\d|an?\b|one\b|two\b|three\b|half\b|quarter\b)", explicit_target, maxsplit=1)[0]
+        elif target_match:
             target = target_match.group(1)
         else:
             command = re.match(r"^(?:remind me|(?:set|add|change|update|edit)(?: (?:a|the|another))? reminder)\s+(.+)$", lowered)
@@ -1984,7 +2007,7 @@ async def _set_reminder(chat_id: int, text: str, event: CalendarEvent, settings:
 def _is_existing_reminder_request(text: str) -> bool:
     text = _command_text(text)
     return bool(re.match(r"^(?:remind me|(?:set|add) (?:a|another|additional) reminder)\b", text, flags=re.I)
-                or re.match(r"^(?:change|edit|update|move|reschedule)\s+(?:(?:a|the)\s+)?reminder(?:\s+(?:for|to|before|at)\b|$)", text, flags=re.I))
+                or _explicit_reminder_target(text, "set|add|change|edit|update|move|reschedule") is not None)
 
 
 def _is_standalone_reminder_request(text: str) -> bool:
