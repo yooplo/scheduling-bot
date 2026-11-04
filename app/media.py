@@ -5,7 +5,7 @@ import base64
 
 from groq import AsyncGroq
 
-from .config import Settings
+from .config import DEFAULT_VISION_MODEL, Settings
 
 PHOTO_LIMIT = 4 * 1024 * 1024
 VOICE_LIMIT = 10 * 1024 * 1024
@@ -23,6 +23,7 @@ async def interpret_media(data: bytes, kind: str, caption: str, settings: Settin
             encoded = base64.b64encode(data).decode("ascii")
             response = await client.chat.completions.create(
                 model=settings.groq_vision_model, temperature=0, max_tokens=900,
+                **({"reasoning_effort": "none"} if settings.groq_vision_model == DEFAULT_VISION_MODEL else {}),
                 messages=[
                     {"role": "system", "content": (
                         "Describe the image or answer the caption concisely. Extract visible event "

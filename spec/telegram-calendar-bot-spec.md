@@ -578,8 +578,10 @@ live media integrations have not been verified):
   10 MiB voice; voice duration at most 120 seconds). Reject oversized files
   before download where metadata permits, and enforce the byte limit while streaming.
 - Use the existing Groq key with independently configurable `GROQ_VISION_MODEL`
-  (default `meta-llama/llama-4-scout-17b-16e-instruct`) and
-  `GROQ_TRANSCRIPTION_MODEL` (default `whisper-large-v3-turbo`). Photo captions
+  (default `qwen/qwen3.8-27b`) and
+  `GROQ_TRANSCRIPTION_MODEL` (default `whisper-large-v3-turbo`). The default
+  vision model uses instruct mode (`reasoning_effort=none`) for concise previews.
+  Photo captions
   guide interpretation; default to describing the image and extracting visible
   event details without inventing dates, times, or scheduling commands. Voice
   notes are transcribed verbatim. Results are limited to 3000 characters.

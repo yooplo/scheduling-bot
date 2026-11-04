@@ -18,8 +18,12 @@ audio-file attachments. Each album photo is processed separately. Media goes to
 Groq for processing and is not saved by the application. New media clears prior
 conversation prompts; other text or private action buttons dismiss its preview.
 Previews are lost on restart. `GROQ_VISION_MODEL` and `GROQ_TRANSCRIPTION_MODEL`
-select the models; both use the existing `GROQ_API_KEY`. Live model access must
-be verified in deployment. Group chats retain text-only schedule access.
+select the models (defaults: `qwen/qwen3.8-27b` for images and
+`whisper-large-v3-turbo` for speech); both use the existing `GROQ_API_KEY`.
+The image default follows [Groq’s supported vision models](https://console.groq.com/docs/vision)
+and is currently a preview model, so check availability before deployment.
+If you already set `GROQ_VISION_MODEL` to a retired model, update it in your
+deployment. Live model access must be verified in deployment. Group chats retain text-only schedule access.
 
 Weekday names and abbreviations (`Mon` through `Sun`) work with AM/PM or 24-hour ranges: `Add Drills at TSA@JK on Mon 8-10pm` and `Add Drills at TSA@JK on Mon 20:00–22:00` both use the next matching Monday (including today), 8–10 PM. Saying `next Monday` on Monday means one week later. For overnight ranges, make both endpoints explicit, such as `11pm-1am` or `23:00-01:00`.
 

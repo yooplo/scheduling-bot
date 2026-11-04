@@ -137,17 +137,22 @@ async def test_provider_failure_has_no_preview_or_sensitive_logs(bot, caplog):
 
 
 @pytest.mark.asyncio
-async def test_groq_photo_and_voice_requests(monkeypatch):
+@pytest.mark.parametrize("vision_model", ["qwen/qwen3.8-27b", "custom-image-model"])
+async def test_groq_photo_and_voice_requests(monkeypatch, vision_model):
     client = AsyncMock()
     client.chat.completions.create.return_value = SimpleNamespace(choices=[SimpleNamespace(message=SimpleNamespace(content="Meeting Friday"))])
     client.audio.transcriptions.create.return_value = SimpleNamespace(text="hello")
     context = AsyncMock()
     context.__aenter__.return_value = client
     monkeypatch.setattr("app.media.AsyncGroq", lambda **kwargs: context)
-    settings = SimpleNamespace(groq_api_key="key", groq_vision_model="vision", groq_transcription_model="whisper")
+    settings = SimpleNamespace(groq_api_key="key", groq_vision_model=vision_model, groq_transcription_model="whisper")
     assert await interpret_media(b"jpg", "photo", "Read it", settings) == "Meeting Friday"
     request = client.chat.completions.create.call_args.kwargs
-    assert request["model"] == "vision"
+    assert request["model"] == vision_model
+    if vision_model == "qwen/qwen3.8-27b":
+        assert request["reasoning_effort"] == "none"
+    else:
+        assert "reasoning_effort" not in request
     assert request["messages"][1]["content"][1]["image_url"]["url"].startswith("data:image/jpeg;base64,")
     assert await interpret_media(b"ogg", "voice", "", settings) == "hello"
     assert client.audio.transcriptions.create.call_args.kwargs["file"] == ("voice.ogg", b"ogg", "audio/ogg")
