@@ -91,9 +91,9 @@ async def test_cancel_and_commands_leave_draft_without_creating(flow, command):
     parser.parse_event.return_value = draft(end=None, confidence="low", missing_fields=["duration"])
     await send("Dentist tomorrow 2pm")
     reply = await send(command)
-    assert 123 not in main.pending_event_drafts
+    assert (123 in main.pending_event_drafts) == (command == "/now")
     calendar.create_event.assert_not_called()
-    assert "cancelled" in reply if command != "/now" else "Asia/Singapore" in reply
+    assert "cancelled" in reply if command != "/now" else "draft is still open" in reply
 
 
 @pytest.mark.asyncio

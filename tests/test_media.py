@@ -1,5 +1,7 @@
 import asyncio
 from types import SimpleNamespace
+from zoneinfo import ZoneInfo
+from app.models import MediaEventSuggestion, ParsedEventDraft
 from unittest.mock import AsyncMock, Mock
 
 import httpx
@@ -12,16 +14,27 @@ from app.telegram_client import TelegramClient
 
 @pytest.fixture
 def bot(monkeypatch):
-    settings = SimpleNamespace(telegram_webhook_secret="secret", telegram_group_id=-100)
+    settings = SimpleNamespace(telegram_webhook_secret="secret", telegram_group_id=-100,
+        timezone=ZoneInfo("Asia/Singapore"), user_timezone="Asia/Singapore", groq_vision_model="vision", groq_transcription_model="whisper")
     telegram = AsyncMock()
     telegram.download_file.return_value = b"image"
     calendar = Mock()
     interpreter = AsyncMock(return_value="Add dentist tomorrow 2-3pm")
-    handler = AsyncMock()
-    monkeypatch.setattr(main, "dependencies", lambda: (settings, telegram, {111: calendar}, Mock(), None))
+    async def consume_message(chat_id, text, *args):
+        # This fixture isolates webhook routing; actual confirmation writes are
+        # exercised by test_conversation_media.
+        if text == "add event" or text in {"cancel", "/cancel"}:
+            main._clear_conversation(chat_id)
+    handler = AsyncMock(side_effect=consume_message)
+    parser = Mock()
+    parser.suggest_media_event.side_effect = lambda *args: MediaEventSuggestion(event_text=interpreter.return_value)
+    parser.parse_event.return_value = ParsedEventDraft(title="Dentist", start="2030-11-20T14:00:00+08:00", end="2030-11-20T15:00:00+08:00", confidence="high")
+    monkeypatch.setattr(main, "dependencies", lambda: (settings, telegram, {111: calendar}, parser, None))
     monkeypatch.setattr(main, "interpret_media", interpreter)
     monkeypatch.setattr(main, "handle_message", handler)
     main.pending_media.clear()
+    main.media_requests.clear()
+    main.media_previews.clear()
     main.processed_message_updates.clear()
 
     async def send(content, user=111, chat=111, kind="private", update_id=None):
@@ -33,6 +46,8 @@ def bot(monkeypatch):
 
     yield send, telegram, interpreter, handler
     main.pending_media.clear()
+    main.media_requests.clear()
+    main.media_previews.clear()
     main.processed_message_updates.clear()
 
 
@@ -46,12 +61,12 @@ async def test_photo_preview_then_explicit_single_use(bot):
     await send({**PHOTO, "caption": "Read appointment"}, update_id=1)
     telegram.download_file.assert_awaited_once_with("large", PHOTO_LIMIT)
     assert interpreter.call_args.args[1:3] == ("photo", "Read appointment")
-    assert "use media" in telegram.send_message.call_args.args[1]
+    assert "Suggested event" in telegram.send_message.call_args.args[1]
     handler.assert_not_awaited()
     await send(PHOTO, update_id=1)  # Telegram redelivery
     interpreter.assert_awaited_once()
     await send({"text": "use media"})
-    assert handler.call_args.args[1] == "Add dentist tomorrow 2-3pm"
+    assert handler.call_args.args[1] == "add event"
     await send({"text": "use media"})
     handler.assert_awaited_once()
     assert "No active" in telegram.send_message.call_args.args[1]
@@ -64,7 +79,8 @@ async def test_voice_preview_and_cancel(bot):
     assert interpreter.call_args.args[1] == "voice"
     await send({"text": "/cancel"})
     await send({"text": "use media"})
-    handler.assert_not_awaited()
+    handler.assert_awaited_once()
+    assert handler.call_args.args[1] == "/cancel"
     assert 111 not in main.pending_media
 
 
@@ -216,9 +232,9 @@ async def test_photo_preview_formats_display_but_routes_original_text(bot):
     original = '**Deadline:** Friday 20 Nov 2026\n* Submit A&B <claim>'
     interpreter.return_value = original
     await send(PHOTO)
-    assert telegram.send_message.call_args.kwargs['parse_mode'] == 'HTML'
-    assert '<b>Deadline:</b>' in telegram.send_message.call_args.args[1]
-    assert '• Submit A&amp;B &lt;claim&gt;' in telegram.send_message.call_args.args[1]
+    preview = next(call for call in telegram.send_message.call_args_list if call.kwargs.get('parse_mode') == 'HTML')
+    assert '<b>Deadline:</b>' in preview.args[1]
+    assert '• Submit A&amp;B &lt;claim&gt;' in preview.args[1]
     handler.assert_not_awaited()
     await send({'text': 'use media'})
-    assert handler.call_args.args[1] == original
+    assert handler.call_args.args[1] == 'add event'
