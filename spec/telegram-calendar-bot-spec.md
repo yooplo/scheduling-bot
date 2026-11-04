@@ -747,3 +747,12 @@ drafts; other slash commands keep their existing replacement semantics.
 - Explicit word clocks (`noon`, `midnight`, `midday`) keep their parsed times
   through contextual edits, event selection, and media corrections. Date-only edits continue to
   preserve the event's existing clocks and duration.
+
+- An expired edit/reminder clarification cannot refresh its target's recent
+  context, including when the next message switches action types. Short replies
+  receive expiry guidance; fresh named requests and read-only commands still
+  route normally without restoring the expired target.
+- For retained edit requests, local date and time validation/overrides use the
+  latest answer supplying each detail, just like creation drafts. A correction
+  to noon, a single clock, a new range, or a duration replaces an earlier range;
+  date corrections replace the earlier date without dropping unrelated details.

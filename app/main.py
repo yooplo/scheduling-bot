@@ -38,7 +38,8 @@ NAMED_DATE_PATTERN = rf"\b(\d{{1,2}})(?:st|nd|rd|th)?\s+({MONTH_NAMES})(?:\s+(\d
 NUMERIC_DATE_PATTERN = r"\b(?:(\d{4})-(\d{1,2})-(\d{1,2})|(\d{1,2})[-/](\d{1,2})(?:[-/](\d{4}))?)\b(?![-/]\d)"
 DATE_HINT_PATTERN = rf"\b(?:{WEEKDAY_NAMES}|{MONTH_NAMES}|today|tonight|tomorrow|tmr|next|this|last|following|after|before|weeks?|months?)\b|{NUMERIC_DATE_PATTERN}"
 WORD_CLOCK_PATTERN = r"\b(?:noon|midnight|midday)\b"
-TIME_HINT_PATTERN = r"\b\d{1,2}[:.]\d{2}|\b\d{1,2}\s*(?:am|pm)\b|\b(?:all|whole)[\s-]+day\b|\b(?:hours?|minutes?|hrs?|mins?|until|till|duration)\b" + "|" + WORD_CLOCK_PATTERN
+DURATION_HINT_PATTERN = r"\b(?:hours?|hrs?|minutes?|mins?|days?|weeks?|duration)\b|\b\d+(?:\.\d+)?\s*(?:hours?|hrs?|minutes?|mins?|days?|weeks?|[hm])\b"
+TIME_HINT_PATTERN = r"\b\d{1,2}[:.]\d{2}|\b\d{1,2}\s*(?:am|pm)\b|\b(?:all|whole)[\s-]+day\b|\b(?:hours?|minutes?|hrs?|mins?|until|till|duration)\b" + "|" + WORD_CLOCK_PATTERN + "|" + DURATION_HINT_PATTERN
 CLOCK_RANGE_PATTERN = re.compile(
     r"\b(\d{1,2})(?:[:.](\d{2}))?\s*(am|pm)?\s*[-–—]\s*(\d{1,2})(?:[:.](\d{2}))?\s*(am|pm)?\b",
     flags=re.IGNORECASE,
@@ -783,19 +784,22 @@ async def handle_message(chat_id, text, settings, telegram, calendar, parser, cr
     # Existing pending selections/confirmations retain priority over contextual references.
     pending = pending_actions.get(chat_id)
     if pending and pending.action in {"followup_edit", "followup_remind"}:
+        replacement = ((text.startswith("/") and not _read_only_request(text)) or _is_explicit_add_request(lower)
+                       or _is_standalone_reminder_request(lower) or _replaces_pending_followup(text, pending.action))
         if lower in {"cancel", "/cancel"}:
             pending_actions.pop(chat_id, None)
             await telegram.send_message(chat_id, "Follow-up cancelled. The saved event is unchanged.")
             return
-        elif ((text.startswith("/") and not _read_only_request(text)) or _is_explicit_add_request(lower)
-              or _is_standalone_reminder_request(lower) or _replaces_pending_followup(text, pending.action)):
+        elif pending.expires_at <= time.monotonic():
+            pending_actions.pop(chat_id, None)
+            pending = None
+            if not replacement and not _read_only_request(text):
+                await telegram.send_message(chat_id, "That follow-up expired. Please send a new request with the event name.")
+                return
+        elif replacement:
             _remember_event(chat_id, pending.events[0])
             pending_actions.pop(chat_id, None)
             pending = None
-        elif pending.expires_at <= time.monotonic():
-            pending_actions.pop(chat_id, None)
-            await telegram.send_message(chat_id, "That follow-up expired. Please send a new request with the event name.")
-            return
         elif _read_only_request(text):
             pending_actions.pop(chat_id, None)
             try:
@@ -1662,9 +1666,11 @@ async def _remove_scheduled_reminder(reminder: ScheduledReminder, calendar: Cale
 async def _edit_event(chat_id: int, text: str, existing: CalendarEvent, settings: Settings, telegram: TelegramClient, calendar: CalendarClient, parser: GroqParser, *, preserve_clock=False) -> None:
     now = datetime.now(settings.timezone)
     destination = re.split(r"\bto\b", text, maxsplit=1, flags=re.IGNORECASE)[-1]
+    date_text = _latest_detail_text(destination, DATE_HINT_PATTERN, remove_ranges=True)
+    time_text = _latest_detail_text(destination, TIME_HINT_PATTERN)
     try:
-        question = _weekday_date_question(destination, settings, now)
-        clocks = _clock_range_from_text(destination)
+        question = _weekday_date_question(date_text, settings, now)
+        clocks = _clock_range_from_text(time_text)
     except ValueError as exc:
         question = str(exc)
     if question:
@@ -1679,21 +1685,21 @@ async def _edit_event(chat_id: int, text: str, existing: CalendarEvent, settings
     else:
         edited = await asyncio.to_thread(parser.parse_edit, text, existing, settings.user_timezone)
         if clocks:
-            if not re.search(DATE_HINT_PATTERN, _without_clock_ranges(destination), flags=re.IGNORECASE):
+            if not re.search(DATE_HINT_PATTERN, _without_clock_ranges(date_text), flags=re.IGNORECASE):
                 edited.start = existing.start
                 edited.end = existing.start
-            _apply_clock_range(edited, clocks, destination, settings, now)
+            _apply_clock_range(edited, clocks, date_text, settings, now)
         if edited.start.tzinfo is not None and edited.end.tzinfo is not None:
-            _apply_weekday_from_text(edited, destination, now)
-    _apply_all_day_from_text(edited, text, settings)
+            _apply_weekday_from_text(edited, date_text, now)
+    _apply_all_day_from_text(edited, time_text, settings)
     if edited.confidence == "low" or edited.start.tzinfo is None or edited.end.tzinfo is None:
         pending_actions[chat_id] = PendingAction([existing], time.monotonic() + PENDING_TTL_SECONDS, "followup_edit", text)
         await telegram.send_message(chat_id, f"What date or time should I use for {existing.title} — {_format_event_range(existing)}? For example, 'Friday after 7pm for 1 hour'. Reply within 5 minutes, or /cancel.")
         return
-    if (preserve_clock and not _has_explicit_event_time(destination)
-            and not re.search(r"\b(?:hours?|hrs?|minutes?|mins?|days?|weeks?|duration)\b|\b\d+(?:\.\d+)?\s*(?:hours?|hrs?|minutes?|mins?|days?|weeks?|[hm])\b", destination, flags=re.I)
-            and not re.search(r"\b(?:all|whole)[\s-]+day\b", destination, flags=re.I)):
-        target = _local_schedule_date(destination, settings, now) or edited.start.astimezone(settings.timezone).date()
+    if (preserve_clock and not _has_explicit_event_time(time_text)
+            and not re.search(DURATION_HINT_PATTERN, time_text, flags=re.I)
+            and not re.search(r"\b(?:all|whole)[\s-]+day\b", time_text, flags=re.I)):
+        target = _local_schedule_date(date_text, settings, now) or edited.start.astimezone(settings.timezone).date()
         local_start = existing.start.astimezone(settings.timezone)
         local_end = (existing.end or existing.start).astimezone(settings.timezone)
         shift = target - local_start.date()

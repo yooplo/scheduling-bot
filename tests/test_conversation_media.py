@@ -617,3 +617,94 @@ async def test_media_word_clock_correction_supersedes_original_numeric_range(flo
     await send("actually noon")
     assert main.media_previews[123].event.start == start
     calendar.create_event.assert_not_called()
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("pending_kind,message", [("remind", "move it to 4pm"), ("edit", "remind me an hour before")])
+async def test_expired_followup_action_switch_never_restores_target(flow, monkeypatch, pending_kind, message):
+    send, _, _, _, calendar, parser = flow
+    clock = [1000.0]
+    monkeypatch.setattr(main, "time", SimpleNamespace(monotonic=lambda: clock[0]))
+    await send("Dinner on 12 October 2030 7–9pm")
+    dinner = main.recent_events[123].events[0]
+    calendar.list_events.return_value = [dinner]
+    valid_edit = parser.parse_edit.side_effect
+    if pending_kind == "remind":
+        parser.parse_reminder_for_event.return_value = ParsedReminder(reminder_minutes=60, confidence="low")
+        await send("remind me before it")
+    else:
+        parser.parse_edit.side_effect = lambda *args: valid_edit(*args).model_copy(update={"confidence": "low"})
+        await send("move it to Friday evening")
+    assert main.pending_actions[123].action == f"followup_{pending_kind}"
+    clock[0] += main.PENDING_TTL_SECONDS + 1
+    parser.parse_edit.side_effect = valid_edit
+    parser.parse_reminder_for_event.return_value = ParsedReminder(reminder_minutes=60, confidence="high")
+    answer = await send(message)
+    assert "Which event" in answer or "expired" in answer
+    assert 123 not in main.recent_events
+    assert 123 not in main.pending_actions
+    calendar.update_event.assert_not_called()
+    calendar.set_reminder.assert_not_called()
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("pending_kind", ["edit", "remind"])
+@pytest.mark.parametrize("action", ["edit", "remind", "delete"])
+async def test_expired_followup_allows_fresh_named_request(flow, monkeypatch, pending_kind, action):
+    send, _, _, _, calendar, parser = flow
+    clock = [1000.0]
+    monkeypatch.setattr(main, "time", SimpleNamespace(monotonic=lambda: clock[0]))
+    await send("Dinner on 12 October 2030 7–9pm")
+    dinner = main.recent_events[123].events[0]
+    valid_edit = parser.parse_edit.side_effect
+    if pending_kind == "remind":
+        parser.parse_reminder_for_event.return_value = ParsedReminder(reminder_minutes=60, confidence="low")
+        await send("remind me before it")
+    else:
+        parser.parse_edit.side_effect = lambda *args: valid_edit(*args).model_copy(update={"confidence": "low"})
+        await send("move it to Friday evening")
+    clock[0] += main.PENDING_TTL_SECONDS + 1
+    dental = dinner.model_copy(update={"event_id": "dental", "title": "Dental"})
+    calendar.list_events.return_value = [dental]
+    from app.models import DeleteMatch
+    parser.match_event.return_value = DeleteMatch(matched_event_id="dental", ambiguous=False)
+    parser.parse_edit.side_effect = valid_edit
+    parser.parse_reminder_for_event.return_value = ParsedReminder(reminder_minutes=30, confidence="high")
+    await send({"edit": "move Dental to Friday at 4pm", "remind": "set a reminder 30 minutes before Dental",
+                "delete": "delete Dental"}[action])
+    if action == "edit":
+        assert calendar.update_event.call_args.args[0].event_id == "dental"
+    elif action == "remind":
+        assert calendar.set_reminder.call_args.args[0].event_id == "dental"
+    else:
+        assert main.pending_actions[123].action == "delete_confirm"
+        assert main.pending_actions[123].events[0].event_id == "dental"
+    calendar.delete_event_with_undo.assert_not_called()
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("answer,hour,end_hour,day", [
+    ("actually noon", 12, 14, 12),
+    ("actually 4pm", 16, 18, 12),
+    ("actually 8–10pm", 20, 22, 12),
+    ("actually 13 October 2030 8–10pm", 20, 22, 13),
+    ("actually 3h", 19, 22, 12),
+])
+async def test_latest_edit_clarification_replaces_retained_range(flow, answer, hour, end_hour, day):
+    send, _, _, _, calendar, parser = flow
+    await send("Dinner on 12 October 2030 7–9pm")
+    original = main.recent_events[123].events[0]
+    parser.parse_edit.side_effect = None
+    parser.parse_edit.return_value = ParsedEdit(title=original.title, location=original.location,
+        start=original.start, end=original.end, confidence="low")
+    await send("move it to 12 October 2030 7–9pm")
+    assert main.pending_actions[123].action == "followup_edit"
+    parser.parse_edit.return_value = ParsedEdit(title=original.title, location=original.location,
+        start=original.start.replace(day=day, hour=hour), end=original.end.replace(day=day, hour=end_hour), confidence="high")
+    await send(answer)
+    calendar.update_event.assert_called_once()
+    target, edited = calendar.update_event.call_args.args
+    assert target.event_id == original.event_id
+    assert (edited.start.day, edited.start.hour, edited.end.day, edited.end.hour) == (day, hour, day, end_hour)
+    assert edited.location == original.location
+    assert answer in parser.parse_edit.call_args.args[0]
