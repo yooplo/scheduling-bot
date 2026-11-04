@@ -15,7 +15,7 @@ from fastapi import FastAPI, Header, HTTPException, Request, Response
 from .calendar_client import CalendarClient, CalendarMoveError
 from .config import ConfigurationError, Settings, get_settings
 from .cron_client import CronJobClient
-from .models import CalendarEvent, CalendarInfo, ParsedEdit, ParsedEvent, ParsedStandaloneReminder, ReminderSpec, ScheduledReminder
+from .models import DeleteMatch, CalendarEvent, CalendarInfo, ParsedEdit, ParsedEvent, ParsedStandaloneReminder, ReminderSpec, ScheduledReminder
 from .media import PHOTO_LIMIT, VOICE_LIMIT, interpret_media
 from .message_formatting import format_media_preview
 from .parser import GroqParser, ParseError
@@ -92,8 +92,19 @@ class PendingEventConflict:
     expires_at: float
     existing: CalendarEvent | None = None
     series: bool = False
+    suggestions: list[ParsedEvent | ParsedEdit] = field(default_factory=list)
 
 
+@dataclass
+class ConversationContext:
+    events: list[CalendarEvent]
+    expires_at: float
+
+
+recent_events: dict[int, ConversationContext] = {}
+recent_event_lists: dict[int, ConversationContext] = {}
+media_requests: dict[int, float] = {}
+media_previews: dict[int, PendingEventConflict] = {}
 pending_event_conflicts: dict[int, PendingEventConflict] = {}
 pending_actions: dict[int, PendingAction] = {}
 pending_calendar_deletions: dict[int, PendingCalendarDeletion] = {}
@@ -150,13 +161,20 @@ async def webhook(request: Request, x_telegram_bot_api_secret_token: str | None 
     if callback:
         chat_id = callback.get("message", {}).get("chat", {}).get("id")
         sender_id = callback.get("from", {}).get("id")
-        if callback.get("data", "").startswith(("conflict:", "select:", "help:", "created:", "delete:")):
+        if callback.get("data", "").startswith(("conflict:", "select:", "help:", "created:", "delete:", "media:")):
             if callback.get("message", {}).get("chat", {}).get("type") != "private" or chat_id != sender_id or sender_id not in calendars:
                 await telegram.answer_callback_query(callback.get("id", ""), "Not available here.")
                 return {"ok": True}
             try:
                 pending_media.pop(chat_id, None)
-                if callback["data"].startswith("help:"):
+                if not callback["data"].startswith("media:"):
+                    if chat_id in media_requests:
+                        pending_event_drafts.pop(chat_id, None)
+                    media_requests.pop(chat_id, None)
+                    media_previews.pop(chat_id, None)
+                if callback["data"].startswith("media:"):
+                    await handle_media_callback(chat_id, callback.get("id", ""), callback["data"], settings, telegram, calendars[sender_id])
+                elif callback["data"].startswith("help:"):
                     topic = callback["data"].removeprefix("help:")
                     await telegram.answer_callback_query(callback.get("id", ""))
                     if topic == "menu" or topic in HELP_TOPICS:
@@ -192,8 +210,8 @@ async def webhook(request: Request, x_telegram_bot_api_secret_token: str | None 
     first_name = (message.get("from", {}).get("first_name") or "").strip()
     text = (message.get("text") or "").strip()
     calendar = calendars.get(sender_id)
-    has_media = bool(message.get("photo") or message.get("voice"))
-    if not chat_id or not (text or has_media):
+    has_media = any(message.get(key) for key in ("voice", "audio", "photo", "document", "video", "video_note", "animation", "sticker"))
+    if not chat_id or (not text and not has_media):
         return {"ok": True}
     if chat.get("type") in {"group", "supergroup"} and chat_id != settings.telegram_group_id:
         return {"ok": True}
@@ -215,28 +233,25 @@ async def webhook(request: Request, x_telegram_bot_api_secret_token: str | None 
         processed_message_updates[key] = now + 86400
     try:
         if chat.get("type") in {"group", "supergroup"}:
-            if has_media:
-                return {"ok": True}
-            await handle_group_schedule(chat_id, sender_id, text, settings, telegram, calendars)
+            if text:
+                await handle_group_schedule(chat_id, sender_id, text, settings, telegram, calendars)
             return {"ok": True}
         if chat.get("type") != "private" or chat_id != sender_id:
             return {"ok": True}
         if has_media:
-            await handle_media(chat_id, message, settings, telegram)
+            await handle_media_message(chat_id, message, settings, telegram, calendar, parser)
             return {"ok": True}
-        preview = pending_media.pop(chat_id, None)
+        pending_media.pop(chat_id, None)
         if text.lower() == "use media":
-            if not preview or not preview[0] or preview[1] <= time.monotonic():
-                await telegram.send_message(chat_id, "No active media preview. Please send the photo or voice note again.")
+            if not media_previews.get(chat_id) and not (chat_id in media_requests and chat_id in pending_event_drafts):
+                await telegram.send_message(chat_id, "No active event suggestion. Send a photo or voice note with event details, or type your request.")
                 return {"ok": True}
-            text = preview[0]
-        elif preview and text.lower() in {"cancel", "/cancel"}:
-            await telegram.send_message(chat_id, "Media preview cancelled.")
-            return {"ok": True}
+            text = "add event" if chat_id in media_previews else "retry"
         if re.match(r"^/start(?:@\w+)?(?:\s|$)", text, flags=re.IGNORECASE):
             pending_event_drafts.pop(chat_id, None)
             pending_event_conflicts.pop(chat_id, None)
             pending_actions.pop(chat_id, None)
+            _clear_conversation(chat_id)
             await telegram.send_message(chat_id, _welcome_message(first_name))
             return {"ok": True}
         await handle_message(chat_id, text, settings, telegram, calendar, parser, cron)
@@ -548,7 +563,251 @@ async def scheduled_standalone_reminder(request: Request, authorization: str | N
     return Response(status_code=204)
 
 
-async def handle_message(chat_id: int, text: str, settings: Settings, telegram: TelegramClient, calendar: CalendarClient, parser: GroqParser, cron: CronJobClient | None = None) -> None:
+async def handle_media_message(chat_id, message, settings, telegram, calendar, parser):
+    _clear_conversation(chat_id)
+    for store in (pending_event_drafts, pending_event_conflicts, pending_actions, recent_reminder_lists, pending_calendar_deletions):
+        store.pop(chat_id, None)
+    media = message.get("voice") or message.get("audio")
+    image = False
+    mime_type = None
+    if not media and message.get("photo"):
+        media = message["photo"][-1]
+        image, mime_type = True, "image/jpeg"
+    if not media and message.get("document"):
+        document = message["document"]
+        mime_type = document.get("mime_type")
+        if mime_type in {"image/jpeg", "image/png", "image/webp"}:
+            media, image = document, True
+    if not media:
+        await telegram.send_message(chat_id, "Send a voice note, audio file, or JPEG/PNG/WebP image of an appointment or invitation. PDFs and videos aren't supported yet.")
+        return
+    if media.get("file_size", 0) > 10 * 1024 * 1024 or media.get("duration", 0) > 300:
+        await telegram.send_message(chat_id, "Please send a file under 10 MiB and audio no longer than 5 minutes.")
+        return
+    vision_model = getattr(settings, "groq_vision_model", None)
+    if image and not vision_model:
+        await telegram.send_message(chat_id, "Image suggestions need GROQ_VISION_MODEL configured with a vision-capable Groq model. You can type the event details instead.")
+        return
+    original_preview = None
+    try:
+        if message.get("photo") or message.get("voice"):
+            await handle_media(chat_id, message, settings, telegram)
+            original_preview = pending_media.get(chat_id)
+            if not original_preview or not original_preview[0]:
+                return
+            content = original_preview[0] + "\nCaption: " + (message.get("caption") or "")
+        else:
+            original_preview = ("", time.monotonic() + PENDING_TTL_SECONDS)
+            pending_media[chat_id] = original_preview
+            data = await telegram.download_media(media["file_id"])
+            caption = (message.get("caption") or "").strip()
+            content = caption
+            if not image:
+                transcript = await asyncio.to_thread(parser.transcribe, data, media.get("file_name", "audio.mp3"),
+                    getattr(settings, "groq_transcription_model", "whisper-large-v3-turbo"))
+                content = f"Transcript: {transcript}\nCaption: {caption}"
+            if not image:
+                await telegram.send_message(chat_id, format_media_preview(content, photo=False), parse_mode="HTML")
+        now = datetime.now(settings.timezone)
+        suggestion = await asyncio.to_thread(parser.suggest_media_event, content, now, settings.user_timezone,
+            data if image and not message.get("photo") else None, mime_type, vision_model)
+        if original_preview is not None and pending_media.get(chat_id) is not original_preview:
+            return
+        if not suggestion.event_text or not suggestion.event_text.strip():
+            await telegram.send_message(chat_id, "I couldn't identify a calendar event in that. Tell me what you'd like to schedule and when.")
+            return
+        media_requests[chat_id] = time.monotonic() + PENDING_TTL_SECONDS
+        # Provider-generated content cannot opt out of the preview or conflict checks.
+        request_text = re.sub(r"\badd\s+anyway\b", "add", suggestion.event_text, flags=re.I)
+        await _add_event(chat_id, request_text, settings, telegram, calendar, parser, now)
+    except Exception:
+        if original_preview is not None and pending_media.get(chat_id) is not original_preview:
+            return
+        media_requests.pop(chat_id, None)
+        media_previews.pop(chat_id, None)
+        pending_event_drafts.pop(chat_id, None)
+        # Do not log provider exceptions: their URLs or payloads may contain credentials/media.
+        logger.warning("Media interpretation failed chat_id=%s", chat_id)
+        await telegram.send_message(chat_id, "I couldn't read that media. Please resend it or type the event details. No event was added.")
+
+
+async def handle_media_callback(chat_id, callback_id, data, settings, telegram, calendar):
+    match = re.fullmatch(r"media:([a-f0-9]{32}):(add|cancel)", data)
+    preview = media_previews.get(chat_id)
+    if not match or not preview or preview.token != match.group(1) or preview.expires_at <= time.monotonic():
+        if preview and preview.expires_at <= time.monotonic():
+            media_previews.pop(chat_id, None)
+            media_requests.pop(chat_id, None)
+        message = "This suggestion expired or was already used. Please send the media again."
+        if callback_id:
+            await telegram.answer_callback_query(callback_id, message)
+        else:
+            await telegram.send_message(chat_id, message)
+        return
+    media_previews.pop(chat_id, None)
+    media_requests.pop(chat_id, None)
+    if callback_id:
+        await telegram.answer_callback_query(callback_id)
+    if match.group(2) == "cancel":
+        await telegram.send_message(chat_id, "Event suggestion cancelled.")
+        return
+    # Recheck the current calendar only after confirmation; source text cannot bypass overlaps.
+    await _check_and_create_event(chat_id, preview.event, "", preview.now, telegram, calendar)
+
+
+def _clear_conversation(chat_id):
+    for store in (recent_events, recent_event_lists, media_requests, media_previews, pending_media):
+        store.pop(chat_id, None)
+
+
+def _remember_event(chat_id, event):
+    recent_events[chat_id] = ConversationContext([event], time.monotonic() + PENDING_TTL_SECONDS)
+    listing = recent_event_lists.get(chat_id)
+    if listing:
+        listing.events = [event if (item.event_id, item.calendar_id) == (event.event_id, event.calendar_id) else item
+                          for item in listing.events]
+
+
+def _correction(text):
+    return bool(re.match(r"^(?:actually|sorry[, ]|make (?:it|that)|instead\b)", text, re.I))
+
+
+def _read_only_request(text):
+    lower = text.lower().strip()
+    return (_telegram_command(text) in {"now", "calendars"}
+            or _is_calendar_list_request(lower)
+            or any(phrase in lower for phrase in FREE_TIME_PHRASES)
+            or bool(re.match(r"^(?:list|upcoming|schedule|plans|what(?:'s|s| are)|show (?:my |the )?(?:schedule|events))\b", lower)))
+
+
+async def handle_message(chat_id, text, settings, telegram, calendar, parser, cron=None):
+    pending_media.pop(chat_id, None)
+    lower = text.lower().strip()
+    command = _telegram_command(text)
+    if command == "cancel" or lower == "cancel":
+        had_context = any(chat_id in store for store in (media_requests, media_previews, recent_events, recent_event_lists))
+        had_pending = any(chat_id in store for store in (pending_actions, pending_event_drafts, pending_event_conflicts, pending_calendar_deletions, recent_reminder_lists))
+        _clear_conversation(chat_id)
+        if had_context and not had_pending:
+            await telegram.send_message(chat_id, "Conversation cancelled. Saved events are unchanged.")
+            return
+    elif command in {"help", "start"}:
+        _clear_conversation(chat_id)
+        await _handle_message(chat_id, text, settings, telegram, calendar, parser, cron)
+        return
+    for store in (recent_events, recent_event_lists):
+        context = store.get(chat_id)
+        if context and context.expires_at <= time.monotonic():
+            store.pop(chat_id, None)
+    if media_requests.get(chat_id, float("inf")) <= time.monotonic():
+        media_requests.pop(chat_id, None)
+        media_previews.pop(chat_id, None)
+        pending_event_drafts.pop(chat_id, None)
+        if not _is_explicit_add_request(lower) and not _read_only_request(text):
+            await telegram.send_message(chat_id, "That event suggestion expired. Please send the media again.")
+            return
+    preview = media_previews.get(chat_id)
+    if preview and lower in {"add event", "confirm", "yes"}:
+        await handle_media_callback(chat_id, "", f"media:{preview.token}:add", settings, telegram, calendar)
+        return
+    if preview:
+        media_previews.pop(chat_id, None)
+        if (_correction(text) or re.search(DATE_HINT_PATTERN + "|" + TIME_HINT_PATTERN, text, re.I)
+                or re.match(r"^(?:at|in|rename|call it|change|move|remind|set .*reminder)\b", lower)) and not _is_explicit_add_request(lower) and not _read_only_request(text) and not _is_standalone_reminder_request(lower):
+            await _add_event(chat_id, preview.request_text + "\nUser follow-up: " + text, settings, telegram, calendar, parser, preview.now)
+            return
+        media_requests.pop(chat_id, None)
+    draft = pending_event_drafts.get(chat_id)
+    if draft and draft.expires_at > time.monotonic() and _read_only_request(text):
+        pending_event_drafts.pop(chat_id, None)
+        try:
+            await _handle_message(chat_id, text, settings, telegram, calendar, parser, cron)
+        finally:
+            pending_event_drafts.setdefault(chat_id, draft)
+        await telegram.send_message(chat_id, "Your event draft is still open: " + draft.request_text.split("\nUser follow-up:")[0][:300] + "\nReply with the missing details, or /cancel.")
+        return
+    if _is_explicit_add_request(lower) or _is_standalone_reminder_request(lower):
+        media_requests.pop(chat_id, None)
+    # Existing pending selections/confirmations retain priority over contextual references.
+    pending = pending_actions.get(chat_id)
+    if pending and pending.action in {"followup_edit", "followup_remind"}:
+        if lower in {"cancel", "/cancel"}:
+            pending_actions.pop(chat_id, None)
+            await telegram.send_message(chat_id, "Follow-up cancelled. The saved event is unchanged.")
+            return
+        elif (text.startswith("/") and not _read_only_request(text)) or _is_explicit_add_request(lower) or _is_standalone_reminder_request(lower):
+            pending_actions.pop(chat_id, None)
+            pending = None
+        elif pending.expires_at <= time.monotonic():
+            pending_actions.pop(chat_id, None)
+            await telegram.send_message(chat_id, "That follow-up expired. Please send a new request with the event name.")
+            return
+        elif _read_only_request(text):
+            pending_actions.pop(chat_id, None)
+            try:
+                await _handle_message(chat_id, text, settings, telegram, calendar, parser, cron)
+            finally:
+                pending_actions.setdefault(chat_id, pending)
+            await telegram.send_message(chat_id, f"Your question about {pending.events[0].title} is still open. Reply with the missing details, or /cancel.")
+            return
+        else:
+            pending_actions.pop(chat_id, None)
+            combined = pending.request_text + "\nUser follow-up: " + text
+            if pending.action == "followup_edit":
+                await _edit_event(chat_id, combined, pending.events[0], settings, telegram, calendar, parser, preserve_clock=True)
+            else:
+                await _set_reminder(chat_id, combined, pending.events[0], settings, telegram, calendar, parser)
+            return
+    actionable_pending = pending and pending.action not in {"created", "undo_delete"} and pending.expires_at > time.monotonic()
+    if not draft and not actionable_pending and not pending_event_conflicts.get(chat_id):
+        reference = re.search(r"\b(?:it|that|this event|that event|this series|that series|the series|the (?:first|second|third|fourth|fifth|last|\d+(?:st|nd|rd|th)?) (?:one|event))\b", lower)
+        reminder = _is_existing_reminder_request(lower) and not _is_standalone_reminder_request(lower)
+        implicit_reminder = reminder and bool(re.fullmatch(r"(?:remind me|(?:set|add)(?: another| a)? reminder) (?:an? |one |\d+ )?(?:hour|day|minute)s? before", lower))
+        clear_reminder = "reminder" in lower and bool(re.match(r"^(?:remove|delete|disable|cancel)\b", lower))
+        action = "clear_reminder" if clear_reminder else "remind" if reminder else "delete" if re.match(r"^(?:delete|remove|cancel)\b", lower) else "edit"
+        has_action = bool(re.match(r"^(?:move|change|edit|update|reschedule|delete|remove|disable|cancel|remind|set|add)\b", lower))
+        contextual = ((_correction(text) or implicit_reminder) or (reference and has_action)) and not text.startswith("/") and not _read_only_request(text) and (not _is_explicit_add_request(lower) or reminder) and not _is_standalone_reminder_request(lower)
+        if contextual:
+            contexts = [item for item in (recent_events.get(chat_id), recent_event_lists.get(chat_id)) if item]
+            context = max(contexts, key=lambda item: item.expires_at, default=None)
+            choices = list(context.events) if context else []
+            ordinal = re.search(r"\bthe (first|second|third|fourth|fifth|last|\d+)(?:st|nd|rd|th)? (?:one|event)\b", lower)
+            if ordinal:
+                context = recent_event_lists.get(chat_id)
+                choices = list(context.events) if context else []
+            if ordinal and not context:
+                choices = []
+            elif ordinal:
+                value = ordinal.group(1)
+                number = {"first": 1, "second": 2, "third": 3, "fourth": 4, "fifth": 5, "last": len(choices)}.get(value)
+                number = number if number is not None else int(value)
+                choices = choices[number-1:number] if number > 0 else []
+            request = text
+            if action == "edit" and _correction(text):
+                destination = re.sub(r"^(?:actually|sorry|make (?:it|that)|instead)[, ]*", "", text, flags=re.I)
+                request = "move this event to " + destination
+            if not choices:
+                await telegram.send_message(chat_id, "Which event do you mean? Send its name or list your schedule again.")
+                return
+            pending_actions.pop(chat_id, None)
+            recent_reminder_lists.pop(chat_id, None)
+            if len(choices) > 1:
+                await _ask_to_select(chat_id, action, request, choices, DeleteMatch(ambiguous=True), telegram)
+            else:
+                selected = choices[0]
+                if selected.recurring_event_id == selected.event_id and not re.search(r"\b(?:series|recurring|weekly|every)\b", request, re.I):
+                    await telegram.send_message(chat_id, "Do you mean the whole recurring series? Include 'series' in your request to change all sessions, or list your schedule and choose one occurrence.")
+                    return
+                _remember_event(chat_id, selected)
+                if action == "edit":
+                    await _edit_event(chat_id, request, choices[0], settings, telegram, calendar, parser, preserve_clock=True)
+                else:
+                    await _execute_selection(chat_id, PendingAction(choices, 0, action, request), choices[0], settings, telegram, calendar, parser, cron)
+            return
+    await _handle_message(chat_id, text, settings, telegram, calendar, parser, cron)
+
+
+async def _handle_message(chat_id: int, text: str, settings: Settings, telegram: TelegramClient, calendar: CalendarClient, parser: GroqParser, cron: CronJobClient | None = None) -> None:
     command = _telegram_command(text)
     lowered = command if command in {"reminders", "calendars", "now"} else text.lower().strip()
     if command == "help":
@@ -584,7 +843,7 @@ async def handle_message(chat_id: int, text: str, settings: Settings, telegram: 
         pending_actions.pop(chat_id, None)
     conflict = pending_event_conflicts.get(chat_id)
     if conflict:
-        choice = {"add anyway": "add", "apply anyway": "add", "change time": "change", "cancel": "cancel", "/cancel": "cancel"}.get(lowered)
+        choice = {"add anyway": "add", "apply anyway": "add", "change time": "change", "suggest times": "suggest", "cancel": "cancel", "/cancel": "cancel"}.get(lowered)
         if choice:
             await handle_conflict_callback(chat_id, "", f"conflict:{conflict.token}:{choice}", settings, telegram, calendar)
             return
@@ -602,7 +861,7 @@ async def handle_message(chat_id: int, text: str, settings: Settings, telegram: 
             await telegram.send_message(chat_id, "That event draft has expired. Please send the event details again.")
             return
         else:
-            combined = f"{draft.request_text}\nUser follow-up: {text}"
+            combined = draft.request_text if lowered == "retry" else f"{draft.request_text}\nUser follow-up: {text}"
             await _add_event(chat_id, combined, settings, telegram, calendar, parser, draft.now)
             return
     recent_reminders = recent_reminder_lists.get(chat_id)
@@ -895,6 +1154,7 @@ async def handle_message(chat_id: int, text: str, settings: Settings, telegram: 
         else:
             events = await asyncio.to_thread(calendar.list_events, 7)
             heading = "Upcoming events"
+        recent_event_lists[chat_id] = ConversationContext(list(events), time.monotonic() + PENDING_TTL_SECONDS)
         if not events:
             await telegram.send_message(chat_id, f"No events for {heading.lower().replace(' events', '')}.")
         else:
@@ -905,6 +1165,11 @@ async def handle_message(chat_id: int, text: str, settings: Settings, telegram: 
 
 
 async def _add_event(chat_id, text, settings, telegram, calendar, parser, now=None):
+    media_generation = media_requests.get(chat_id)
+    media_source = None
+    if media_generation is not None:
+        media_source = ("", time.monotonic() + PENDING_TTL_SECONDS)
+        pending_media[chat_id] = media_source
     lowered = text.lower()
     now = now or datetime.now(settings.timezone)
     date_text = _latest_detail_text(text, DATE_HINT_PATTERN, remove_ranges=True)
@@ -926,9 +1191,17 @@ async def _add_event(chat_id, text, settings, telegram, calendar, parser, now=No
     ):
         await _ask_event_detail(chat_id, text, "What time? You can also say 'all day'.", now, telegram)
         return
-    event = _explicit_all_day_event(text, settings) or await asyncio.to_thread(
-        parser.parse_event, _event_parser_text(text), now, settings.user_timezone,
-    )
+    try:
+        event = _explicit_all_day_event(text, settings) or await asyncio.to_thread(
+            parser.parse_event, _event_parser_text(text), now, settings.user_timezone,
+        )
+    except Exception:
+        if media_generation is not None and (media_requests.get(chat_id) != media_generation or pending_media.get(chat_id) is not media_source):
+            return
+        await _ask_event_detail(chat_id, text, "I couldn't interpret that just now. Your draft is retained. Reply 'retry', give clearer details, or /cancel. No event was added.", now, telegram)
+        return
+    if media_generation is not None and (media_requests.get(chat_id) != media_generation or pending_media.get(chat_id) is not media_source):
+        return
     if clocks:
         _apply_clock_range(event, clocks, date_text, settings, now)
     missing = getattr(event, "missing_fields", [])
@@ -955,6 +1228,27 @@ async def _add_event(chat_id, text, settings, telegram, calendar, parser, now=No
         return
     pending_event_drafts.pop(chat_id, None)
     _apply_weekday_from_text(event, date_text, now)
+    if chat_id in media_requests:
+        token = uuid4().hex
+        media_previews[chat_id] = PendingEventConflict(event, text, now, token, time.monotonic() + PENDING_TTL_SECONDS)
+        media_requests[chat_id] = time.monotonic() + PENDING_TTL_SECONDS
+        details = f"Suggested event: {event.title} — {_format_event_range(event)}"
+        if event.location:
+            details += f"\n📍 {event.location}"
+        details += f"\nCalendar: {event.calendar_name or 'your default calendar'}"
+        if event.recurrence:
+            details += f"\nRepeats: {event.recurrence}"
+        if event.reminders:
+            details += "\n⏰ " + _reminder_confirmation(event.reminders)
+        await telegram.send_message(chat_id, details + "\nAdd this event? You can correct the details first. Choose within 5 minutes.", {
+            "inline_keyboard": [[{"text": "Add event", "callback_data": f"media:{token}:add"},
+                                 {"text": "Cancel", "callback_data": f"media:{token}:cancel"}]]})
+        return
+    await _check_and_create_event(chat_id, event, text, now, telegram, calendar)
+
+
+async def _check_and_create_event(chat_id, event, text, now, telegram, calendar):
+    lowered = text.lower()
     conflicts = [existing for existing in await asyncio.to_thread(calendar._list_events_between, event.start, event.end) if existing.start < event.end and (existing.end or existing.start) > event.start]
     if conflicts and "add anyway" not in lowered:
         details = "\n".join(f"• {existing.title} — {_format_event_range(existing)}" for existing in conflicts[:3])
@@ -963,13 +1257,15 @@ async def _add_event(chat_id, text, settings, telegram, calendar, parser, now=No
         buttons = [[{"text": label, "callback_data": f"conflict:{token}:{action}"} for label, action in (
             ("Add anyway", "add"), ("Change time", "change"), ("Cancel", "cancel"),
         )]]
+        if not event.all_day:
+            buttons.append([{"text": "Suggest times", "callback_data": f"conflict:{token}:suggest"}])
         await telegram.send_message(chat_id, f"⚠️ This overlaps with:\n{details}\n\nPending: {event.title} — {_format_event_range(event)}\nChoose an option within 5 minutes.", {"inline_keyboard": buttons})
         return
     await _create_event(chat_id, event, telegram, calendar)
 
 
 async def handle_conflict_callback(chat_id, callback_id, data, settings, telegram, calendar):
-    match = re.fullmatch(r"conflict:([a-f0-9]{32}):(add|change|cancel)", data)
+    match = re.fullmatch(r"conflict:([a-f0-9]{32}):(add|change|cancel|suggest|slot:[01])", data)
     pending = pending_event_conflicts.get(chat_id)
     if not match or not pending or match.group(1) != pending.token or pending.expires_at <= time.monotonic():
         if pending and pending.expires_at <= time.monotonic():
@@ -985,6 +1281,27 @@ async def handle_conflict_callback(chat_id, callback_id, data, settings, telegra
     if callback_id:
         await telegram.answer_callback_query(callback_id)
     action = match.group(2)
+    if action == "suggest":
+        await _suggest_conflict_times(chat_id, pending, telegram, calendar)
+        return
+    if action.startswith("slot:"):
+        index = int(action[-1])
+        if index >= len(pending.suggestions):
+            await telegram.send_message(chat_id, "That time choice is no longer available. Please send a new request.")
+            return
+        proposed = pending.suggestions[index]
+        if pending.existing:
+            events = await asyncio.to_thread(calendar._list_events_between, proposed.start, proposed.end)
+            conflicts = [event for event in events
+                         if (event.event_id, event.calendar_id) != (pending.existing.event_id, pending.existing.calendar_id)
+                         and event.start < proposed.end and (event.end or event.start) > proposed.start]
+            if conflicts:
+                await telegram.send_message(chat_id, "That slot is now occupied. Please send a new time for the event.")
+                return
+            await _commit_edit(chat_id, pending.existing, proposed, pending.series, telegram, calendar)
+        else:
+            await _check_and_create_event(chat_id, proposed, "", pending.now, telegram, calendar)
+        return
     if action == "cancel":
         await telegram.send_message(chat_id, "Event edit cancelled." if pending.existing else "Event creation cancelled.")
     elif pending.existing:
@@ -999,6 +1316,37 @@ async def handle_conflict_callback(chat_id, callback_id, data, settings, telegra
         await _ask_event_detail(chat_id, text, "What date or time should I use instead? For example, 'tomorrow at 4pm'.", pending.now, telegram)
     else:
         await _create_event(chat_id, pending.event, telegram, calendar)
+
+
+async def _suggest_conflict_times(chat_id, pending, telegram, calendar):
+    if pending.event.all_day:
+        await telegram.send_message(chat_id, "Please choose another date for this all-day event.")
+        return
+    start = max(pending.event.end, datetime.now(pending.event.start.tzinfo))
+    horizon = start + timedelta(days=7)
+    duration = pending.event.end - pending.event.start
+    events = await asyncio.to_thread(calendar._list_events_between, start, horizon)
+    occupied = sorted((event for event in events if not pending.existing or
+                       (event.event_id, event.calendar_id) != (pending.existing.event_id, pending.existing.calendar_id)), key=lambda event: event.start)
+    choices = []
+    candidate = start
+    while candidate + duration <= horizon and len(choices) < 2:
+        overlaps = [event for event in occupied if event.start < candidate + duration and (event.end or event.start) > candidate]
+        if overlaps:
+            candidate = max(event.end or event.start for event in overlaps)
+            continue
+        choices.append(pending.event.model_copy(update={"start": candidate, "end": candidate + duration}))
+        candidate += duration
+    if not choices:
+        await telegram.send_message(chat_id, "I couldn't find another slot of that length in the next 7 days. Try a different date or duration.")
+        return
+    pending.token = uuid4().hex
+    pending.expires_at = time.monotonic() + PENDING_TTL_SECONDS
+    pending.suggestions = choices
+    pending_event_conflicts[chat_id] = pending
+    buttons = [[{"text": _format_event_range(choice), "callback_data": f"conflict:{pending.token}:slot:{i}"}] for i, choice in enumerate(choices)]
+    buttons.append([{"text": "Cancel", "callback_data": f"conflict:{pending.token}:cancel"}])
+    await telegram.send_message(chat_id, f"Other available times for {pending.event.title}:\nChoose within 5 minutes; I'll check again before saving.", {"inline_keyboard": buttons})
 
 
 async def _create_event(chat_id, event, telegram, calendar):
@@ -1024,6 +1372,7 @@ async def _send_saved_event(chat_id, created, recurring, telegram, message):
     token = uuid4().hex
     if recurring:
         created = created.model_copy(update={"recurring_event_id": created.event_id})
+    _remember_event(chat_id, created)
     pending_actions[chat_id] = PendingAction([created], time.monotonic() + PENDING_TTL_SECONDS,
                                            "created", "weekly series" if recurring else "", token)
     buttons = [{"text": label, "callback_data": f"created:{token}:{action}"} for label, action in (
@@ -1122,8 +1471,10 @@ async def handle_created_callback(chat_id, callback_id, data, telegram, calendar
 
 
 async def _ask_event_detail(chat_id, text, question, now, telegram):
+    if chat_id in media_requests:
+        media_requests[chat_id] = time.monotonic() + PENDING_TTL_SECONDS
     pending_event_drafts[chat_id] = PendingEventDraft(text, now, time.monotonic() + PENDING_TTL_SECONDS)
-    await telegram.send_message(chat_id, f"{question}\nReply within 5 minutes, or send /cancel.")
+    await telegram.send_message(chat_id, f"{question}\nFor: {text.split(chr(10))[0][:300]}\nReply within 5 minutes, or send /cancel.")
 
 
 def _is_explicit_series_delete(text: str, event: CalendarEvent) -> bool:
@@ -1163,6 +1514,7 @@ async def _ask_delete_confirmation(
 
 async def _complete_event_deletion(chat_id: int, pending: PendingAction, telegram, calendar) -> None:
     event = pending.events[0]
+    _clear_conversation(chat_id)
     if pending.series:
         await asyncio.to_thread(calendar.delete_series, event)
         await telegram.send_message(chat_id, f"✅ Deleted recurring series: {event.title}. This cannot be undone by the bot.")
@@ -1280,7 +1632,8 @@ async def _edit_event(chat_id: int, text: str, existing: CalendarEvent, settings
             _apply_weekday_from_text(edited, destination, now)
     _apply_all_day_from_text(edited, text, settings)
     if edited.confidence == "low" or edited.start.tzinfo is None or edited.end.tzinfo is None:
-        await telegram.send_message(chat_id, "I need a clearer change. For example: 'move IPPT on Saturday to 4pm'.")
+        pending_actions[chat_id] = PendingAction([existing], time.monotonic() + PENDING_TTL_SECONDS, "followup_edit", text)
+        await telegram.send_message(chat_id, f"What date or time should I use for {existing.title} — {_format_event_range(existing)}? For example, 'Friday after 7pm for 1 hour'. Reply within 5 minutes, or /cancel.")
         return
     if preserve_clock and not _has_explicit_event_time(destination) and not re.search(r"\b(?:all|whole)[\s-]+day\b", destination, flags=re.IGNORECASE):
         target = _local_schedule_date(destination, settings, now) or edited.start.astimezone(settings.timezone).date()
@@ -1306,7 +1659,8 @@ async def _edit_event(chat_id: int, text: str, existing: CalendarEvent, settings
                 time.monotonic() + PENDING_TTL_SECONDS, existing, series)
             details = "\n".join(f"• {event.title} — {_format_event_range(event)}" for event in conflicts[:3])
             await telegram.send_message(chat_id, f"⚠️ This edit overlaps with:\n{details}\n\nProposed: {edited.title} — {_format_event_range(edited)}\nChoose within 5 minutes.",
-                {"inline_keyboard": [[{"text": "Apply anyway", "callback_data": f"conflict:{token}:add"}, {"text": "Cancel", "callback_data": f"conflict:{token}:cancel"}]]})
+                {"inline_keyboard": [[{"text": "Apply anyway", "callback_data": f"conflict:{token}:add"}, {"text": "Cancel", "callback_data": f"conflict:{token}:cancel"}]] +
+                 ([[{"text": "Suggest times", "callback_data": f"conflict:{token}:suggest"}]] if not edited.all_day else [])})
             return
     await _commit_edit(chat_id, existing, edited, series, telegram, calendar)
 
@@ -1326,9 +1680,11 @@ async def _commit_edit(chat_id, existing, edited, series, telegram, calendar):
 
 
 async def _set_reminder(chat_id: int, text: str, event: CalendarEvent, settings: Settings, telegram: TelegramClient, calendar: CalendarClient, parser: GroqParser) -> None:
+    _remember_event(chat_id, event)
     reminder = await asyncio.to_thread(parser.parse_reminder_for_event, text, event, settings.user_timezone)
     if reminder.confidence == "low":
-        await telegram.send_message(chat_id, "Tell me when to remind you, for example: 'set a reminder one day before IPPT'.")
+        pending_actions[chat_id] = PendingAction([event], time.monotonic() + PENDING_TTL_SECONDS, "followup_remind", text)
+        await telegram.send_message(chat_id, f"When should I remind you about {event.title}? For example, '1 hour before'. Reply within 5 minutes, or /cancel.")
         return
     message = _reminder_message_from_text(text)
     append = any(word in text.lower() for word in ("another", "also", "additional"))
@@ -1667,13 +2023,14 @@ def _upcoming_weekday_from_text(text: str, settings: Settings):
 
 
 async def _execute_selection(chat_id, pending, selected, settings, telegram, calendar, parser, cron):
+    _remember_event(chat_id, selected)
     if pending.action == "delete":
         await _ask_delete_confirmation(
             chat_id, selected, telegram,
             series=_is_explicit_series_delete(pending.request_text, selected),
         )
     elif pending.action == "edit":
-        await _edit_event(chat_id, pending.request_text, selected, settings, telegram, calendar, parser)
+        await _edit_event(chat_id, pending.request_text, selected, settings, telegram, calendar, parser, preserve_clock=True)
     elif pending.action == "clear_reminder":
         if selected.event_id.startswith("cron:") and cron:
             await cron.delete_reminder(int(selected.event_id.removeprefix("cron:")))
@@ -1757,7 +2114,10 @@ HELP_TOPICS = {
         "Conflicts are checked at the requested date, even months ahead, and offer Add anyway (or Apply anyway for edits) and Cancel. "
         "Recurring events check only the first occurrence. "
         "After adding or updating, Change date/time, Change calendar and Delete this event buttons work for 5 minutes; date-only replies keep the time and duration. Recurring-series buttons affect the whole series. "
-        "Say 'weekly series' when editing or deleting all occurrences."),
+        "Say 'weekly series' when editing or deleting all occurrences. "
+        "For 5 minutes after saving, say 'make it 4pm', 'actually Sunday', or 'remind me an hour before'. "
+        "After listing events, say 'move the second one to Friday'. "
+        "Send a voice note, audio file or invitation image to review an event suggestion before adding it."),
     "reminders": ("Reminders", "Reminders — send a message like:\n\n"
         "remind me in 10 minutes to check the oven\n"
         "remind me 15 minutes before Dental\n"

@@ -106,3 +106,7 @@ class ScheduledReminder(BaseModel):
     event_title: str | None = None
     standalone: bool = False
     status: str = "Scheduled"
+
+
+class MediaEventSuggestion(BaseModel):
+    event_text: str | None = Field(default=None, max_length=4000)

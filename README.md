@@ -4,32 +4,53 @@ A private, webhook-based FastAPI service that combines deterministic command rou
 
 Include a location naturally when creating an event, for example: `Dinner at La Pasta Saturday 7–9pm`. Locations are shown in upcoming lists when provided.
 
-Send a **photo or voice note in private chat** to read an image or transcribe
-speech using Groq. Image previews display bold labels and readable bullets,
-with concise summaries that focus on the content. Voice transcripts preserve
-the spoken text. Photo captions can guide extraction, such as “Read the
-appointment details.” Check the preview, then reply `use media` within five
-minutes to process it through the usual scheduling flow. You can instead send
-corrected text or `/cancel`. A preview alone makes no calendar or reminder
-changes. Example: voice note “Add dentist tomorrow 2 to 3pm” → transcript →
-`use media` → usual event creation/conflict checks.
-
-Photos must be at most 4 MiB; voice notes at most 10 MiB and two minutes.
-Only Telegram photos and voice notes are supported, rather than document or
-audio-file attachments. Each album photo is processed separately. Media goes to
-Groq for processing and is not saved by the application. New media clears prior
-conversation prompts; other text or private action buttons dismiss its preview.
-Previews are lost on restart. `GROQ_VISION_MODEL` and `GROQ_TRANSCRIPTION_MODEL`
-select the models (defaults: `qwen/qwen3.8-27b` for images and
-`whisper-large-v3-turbo` for speech); both use the existing `GROQ_API_KEY`.
-The image default follows [Groq’s supported vision models](https://console.groq.com/docs/vision)
-and is currently a preview model, so check availability before deployment.
-If you already set `GROQ_VISION_MODEL` to a retired model, update it in your
-deployment. Live model access must be verified in deployment. Group chats retain text-only schedule access.
+Send a photo or voice note in private chat for a formatted AI preview and a
+relevant event suggestion. Review the event details and tap **Add event**;
+`use media` also confirms a complete suggestion. Missing details are clarified
+before confirmation. See Conversational follow-ups and media below for formats,
+limits and examples. Media never directly executes edit or delete commands.
 
 Weekday names and abbreviations (`Mon` through `Sun`) work with AM/PM or 24-hour ranges: `Add Drills at TSA@JK on Mon 8-10pm` and `Add Drills at TSA@JK on Mon 20:00–22:00` both use the next matching Monday (including today), 8–10 PM. Saying `next Monday` on Monday means one week later. For overnight ranges, make both endpoints explicit, such as `11pm-1am` or `23:00-01:00`.
 
 If a weekday and date disagree, the bot asks which date to use before adding the event. For example, `Mon 10 October 2026 8-10pm` asks for clarification because that date is Saturday; reply `Mon` or `12 October 2026` to correct it. The draft retains the other details for five minutes; `/cancel` discards it. Numeric dates use day/month order (`12/10/2026`), while ISO dates (`2026-10-12`) also work. An ambiguous range such as `11-1am` asks you to specify both AM/PM markers.
+
+## Conversational follow-ups and media
+
+For five minutes after adding or updating an event, say `make it 4pm`,
+`actually Sunday`, or `remind me an hour before`. Date-only corrections keep
+its time and duration. After listing your schedule, say `move the second one
+to Friday` or `delete the first event`; deletions still require confirmation.
+If `it` could refer to several listed events, the bot asks you to choose.
+`/cancel`, `/help`, `/start`, expiry and restart clear recent conversation context.
+
+While completing a draft, you can ask `what are my plans Friday?`, check
+availability, or use `/now` and `/calendars`, then return to the missing details.
+The lookup does not extend the draft's five-minute expiry. Uncertain edits keep
+the selected event for your next answer. Interpretation failures retain the
+creation draft so you can reply `retry`; calendar write failures still require
+checking your calendar before trying again.
+
+On a timed-event conflict, tap **Suggest times** for up to two later free slots
+within seven days. Suggestions preserve duration and check availability again
+when selected; they do not infer preferred working hours or check every future
+occurrence of a recurring series.
+
+Send a Telegram voice note, audio file, or JPEG/PNG/WebP image of an invitation
+or appointment. The bot extracts one relevant event, asks for missing details,
+and shows **Add event / Cancel** before writing anything. You can correct the
+suggestion, for example `actually Sunday` or `at Clinic A`, before confirming.
+Captions are included. Suggestions and buttons expire after five minutes;
+new media or an unrelated request replaces them. No relevant event means no
+calendar write. PDFs, videos and other documents are currently unsupported.
+Telegram photos must be at most 4 MiB; voice notes at most 10 MiB and two
+minutes. Audio files and image documents must be at most 10 MiB; audio files
+with a supplied duration must be at most five minutes. Media is sent to Groq for interpretation and is not saved to disk.
+
+Voice/audio uses `GROQ_TRANSCRIPTION_MODEL` (default `whisper-large-v3-turbo`).
+Images use `GROQ_VISION_MODEL` (default `qwen/qwen3.8-27b`, with instruct mode
+for the default model). Both models use the existing Groq key; verify model
+availability in your account before deployment.
+Model availability and end-to-end Telegram/Groq behavior need deployment checks.
 
 ## What the bot can do
 
@@ -69,7 +90,7 @@ All requests use `USER_TIMEZONE` (normally `Asia/Singapore`).
 
 The bot retains events that overlap an upcoming event and offers **Add anyway**, **Change time**, and **Cancel** buttons for five minutes. **Add anyway** creates the saved event without retyping; **Change time** asks for a new date/time, keeps the duration unless you change it, and checks conflicts again. You can also type `add anyway`, `change time`, or `cancel` while the warning is active. Other messages dismiss the warning and are handled normally. Old or already-used buttons cannot submit a newer draft. The full form `add anyway meeting tomorrow 2–3pm` still works; its control words are removed before title parsing.
 
-When adding an event in private chat, the bot remembers incomplete requests and asks for the missing date, time, or duration. For example, `Dentist tomorrow` → `What time?` → `2pm` → `How long?` → `1 hour` creates a 2–3pm appointment. You can answer with several details at once or say `all day` to skip time and duration. Timed events no longer default to one hour. Reply within five minutes of each question; `cancel` or `/cancel` discards the draft. A new slash command or explicit `add`/`create`/`put` request starts fresh. Drafts are lost when the bot restarts.
+When adding an event in private chat, the bot remembers incomplete requests and asks for the missing date, time, or duration. For example, `Dentist tomorrow` → `What time?` → `2pm` → `How long?` → `1 hour` creates a 2–3pm appointment. You can answer with several details at once or say `all day` to skip time and duration. Timed events no longer default to one hour. Reply within five minutes of each question; `cancel` or `/cancel` discards the draft. A new explicit `add`/`create`/`put` request or slash command starts fresh, except read-only `/now` and `/calendars`, which preserve the draft. Drafts are lost when the bot restarts.
 
 New-event conflict checks cover the event's requested interval across accessible calendars, even months ahead, including all-day and overnight events. A calendar read failure prevents creation. Recurring additions check their first occurrence rather than every future occurrence.
 
