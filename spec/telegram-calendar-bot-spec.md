@@ -772,3 +772,28 @@ drafts; other slash commands keep their existing replacement semantics.
   using it. A superseded interpretation returns no result and cannot adopt a
   newer message's extraction or combine it with an older caption, including
   when replacement happens during preview delivery or event extraction.
+
+
+### Correction semantics and additional lifecycle checks
+
+Later answers replace earlier recurrence/reminder instructions. Deterministic
+weekly overrides use only the latest scheduling instruction; multi-weekday and
+bounded recurrence rules retain validated parser output. One-off corrections
+clear a new draft's recurrence. Reminder corrections replace prior reminders;
+`also`/`another`/`additional` explicitly append, matching removals remove only
+that lead time, and `no reminders` clears all Telegram reminder metadata.
+Equivalent duplicate reminders are suppressed. Corrected invalid reminder
+lead times must be recoverable without replaying invalid history.
+Reminder messages are preserved as text and cannot change the event's date or
+clock. Local scheduling overrides ignore reminder clauses. All-day/timed
+corrections use the latest time instruction and reject missing timezone offsets.
+
+Private-chat async continuations are scoped to the current valid input, per chat.
+A new input or cancellation invalidates older parsing, matching, availability,
+and permission-read work before a write starts. A write already submitted may
+finish and report its result, but cannot replace newer context or shortcuts.
+Stale/expired callbacks only acknowledge expiry and do not invalidate a newer
+request. Interrupted drafts are restored only while current and unexpired.
+Management intents use command positions rather than words embedded in event
+titles; explicit additions remain additions except established calendar/reminder
+commands. Fresh named management requests also replace incomplete text drafts.

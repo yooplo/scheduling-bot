@@ -52,6 +52,20 @@ for the default model). Both models use the existing Groq key; verify model
 availability in your account before deployment.
 Model availability and end-to-end Telegram/Groq behavior need deployment checks.
 
+While reviewing a proposed event, corrections replace earlier instructions:
+`actually every Tuesday` changes the weekly rule, and `actually remind me 15 minutes before` replaces prior Telegram
+reminders. Say `also remind me 15 minutes before` or `add another reminder ...`
+to keep earlier alerts. `no reminders` clears them; `just once` makes a proposed
+series a one-off event. Dates and times inside custom reminder messages do not
+reschedule the event. For a title that starts with a reserved command form,
+quote it, for example `add 'Reminder Rehearsal' Friday 7–9pm`.
+
+Cancellation and replacement discard older parsing and availability work before
+it starts a write. An operation already submitted to Calendar may still finish;
+its completion cannot replace a newer draft, list, or action buttons. Stale
+buttons do not cancel newer media interpretation. These controls apply per chat
+in the running process; deployment and live integrations still need verification.
+
 ## What the bot can do
 
 All requests use `USER_TIMEZONE` (normally `Asia/Singapore`).
