@@ -59,3 +59,6 @@ class TelegramClient:
         async with httpx.AsyncClient(timeout=15) as client:
             response = await client.post(f"{self._base_url}/answerCallbackQuery", json=payload)
             response.raise_for_status()
+
+    async def download_media(self, file_id: str, max_bytes: int = 10 * 1024 * 1024) -> bytes:
+        return await self.download_file(file_id, max_bytes)

@@ -304,13 +304,13 @@ answers for five minutes after each question. Replies bypass normal intent
 routing and return to event parsing, preserving the title, location, calendar,
 recurrence and reminders. One answer can supply several details. Relative dates
 use the original request's reference datetime throughout the conversation.
-`cancel` or `/cancel` cancels the draft; a new slash command or explicit
+`cancel` or `/cancel` cancels the draft; read-only `/now` and `/calendars` preserve it. Other new slash commands or explicit
 `add`/`create`/`put` request or recognized new independent-reminder request discards it and follows normal handling, including when the draft or edit prompt has expired. `/start`
 also clears it. An expired draft's next non-command reply asks the user to
 resend the event instead of treating the answer as a new event. Drafts are
 isolated by private chat and are lost on restart. Conflict handling and
 calendar permissions still apply once the event is complete. This flow covers
-event creation; edits and standalone reminders retain their existing behavior.
+event creation; uncertain edits also retain their target for a follow-up as described in the conversational context section. Standalone reminders retain their existing behavior.
 
 Examples (each question also states the five-minute timeout and `/cancel`):
 
@@ -433,7 +433,7 @@ flow. The check covers the displayed occurrence's proposed interval, including
 dates beyond 30 days, not every future occurrence of a recurring series.
 Location-only edits do not need a conflict check. Invalid time ranges are
 rejected. Supplied clock times must not be mistaken for location text.
-Simple destination weekdays and clock ranges use the same local correction as additions. In `move Monday Drills to Tue 20:00–22:00`, only the destination after `to` determines the new date. A range without a new date keeps the selected event's local date. A destination date/weekday disagreement or invalid range performs no write and asks the user to resend the edit with the intended date/time; no new pending edit draft is introduced.
+Simple destination weekdays and clock ranges use the same local correction as additions. In `move Monday Drills to Tue 20:00–22:00`, only the destination after `to` determines the new date. A range without a new date keeps the selected event's local date. A destination date/weekday disagreement or invalid range performs no write and asks the user to resend the edit with the intended date/time; invalid local dates/ranges require a fresh edit request; low-confidence parsed edits retain their target for a follow-up.
 1. Detect an edit keyword such as "change", "move", "reschedule", or "update"
 2. Fetch upcoming events for the next 30 days and match the referenced event
 3. If ambiguous, present candidate buttons and retain the original edit request for five minutes
@@ -572,8 +572,9 @@ unconfirmed. This change removes the single-attempt failure mode.
 Implemented behavior (covered by mocked regression tests in `tests/test_media.py`;
 live media integrations have not been verified):
 - Authorized private chats accept Telegram photos (JPEG) and voice notes (OGG);
-  groups never download or interpret media. Image documents, audio files, albums
-  as one request, and video are outside this scope. Each album photo is separate.
+  groups never download or interpret media. Audio files and JPEG/PNG/WebP image
+  documents are also supported (10 MiB; supplied audio duration at most five
+  minutes). Albums as one request and video are outside this scope. Each album photo is separate.
 - Download media from Telegram into bounded memory only (4 MiB photos,
   10 MiB voice; voice duration at most 120 seconds). Reject oversized files
   before download where metadata permits, and enforce the byte limit while streaming.
@@ -593,13 +594,15 @@ live media integrations have not been verified):
 - Image summaries focus on the main content and useful dates/details; omit
   phone status bars and app controls unless the caption asks for them. Use
   short paragraphs or bullets with blank lines between sections.
-- Show the interpreted text without calendar or reminder operations. The user
-  may send corrected text normally, or reply exactly `use media` within five
-  minutes to route the preview through the existing text handler, including
-  clarification, conflict checks, permissions, and deletion confirmations.
+- Show the interpreted text without calendar or reminder operations, then
+  extract one relevant event suggestion. Ask for missing details and show
+  Add event/Cancel for a complete suggestion. `use media` confirms a complete
+  suggestion or retries its incomplete draft; it never routes media content
+  into edit/delete/reminder command execution. Ordinary conflict checks and
+  permissions apply after confirmation.
 - Previews are per private chat, in memory, consumed before routing, replaced
-  by new media, dismissed by any other text or private action callback, and lost
-  on restart. `cancel` or `/cancel` dismisses a preview without writes. Expired
+  by new media or unrelated requests, and lost on restart. Corrections preserve
+  the event suggestion confirmation requirement. `cancel` or `/cancel` dismisses a preview without writes. Expired
   or absent `use media` requests ask for resubmission and cannot create events.
   New media dismisses previous conversation prompts to avoid attaching media
   text to unrelated pending actions. Failed interpretation leaves no preview.
@@ -678,3 +681,138 @@ live media integrations have not been verified):
 - This verifies the deployed HTTP process and code revision, not external
   integrations, webhook delivery, reminders, or successful bot configuration.
   Automated tests use mocked HTTP responses; a live workflow run is separate.
+
+
+## Conversational context and media suggestions
+
+Private chats retain a recent event and the last displayed event list separately
+for five minutes in memory. `make it 4pm`, `actually Sunday`, `remind me an hour
+before`, and `move the second one to Friday` act on the retained IDs, never an
+invented title match. Listing replaces the list context; multiple possible
+references require selection. Context is per private chat, expires on restart,
+and clears with /start, /help, /cancel or deletion. Explicit named requests keep
+existing routing. Date-only contextual corrections preserve time and duration. References to a saved recurring-series master require explicit series wording; selecting a listed occurrence keeps occurrence scope.
+Read-only schedule/availability lookups may interrupt an incomplete event draft;
+they do not extend its expiry, and the response reminds the user of the draft.
+Clarification prompts include the supplied request. Existing confirmation,
+permissions, recurring scope, and conflict checks still apply.
+
+Authorized private voice/audio and JPEG/PNG/WebP images (including image
+documents) are downloaded into bounded memory: 4 MiB for Telegram photos,
+10 MiB otherwise; voice notes are limited to two minutes and audio files to
+five minutes when duration is supplied. Groq transcribes audio; image extraction
+uses GROQ_VISION_MODEL (default qwen/qwen3.8-27b). The content and caption are untrusted data,
+not instructions. Extract one relevant event, or say none is evident. PDFs,
+video and other documents receive a supported-format hint. Media never writes
+an event immediately: incomplete suggestions ask for details, complete suggestions
+show title, date/time, location, calendar and recurrence for Add event/Cancel.
+Confirmation is private, token-bound, single-use and expires after five minutes;
+new media or an unrelated request replaces the suggestion. Text corrections to
+a suggestion preserve its confirmation requirement. On confirmation, recheck
+conflicts and permissions using the ordinary add flow. No detected event, model
+failure, unsupported input, stale buttons and repeated taps perform no write.
+Media processing uses no disk persistence. Provider access and model availability
+must be configured and verified separately from mocked tests.
+
+Additional conversational behavior: uncertain contextual edits and reminder lead
+times retain the exact target for a five-minute follow-up; /cancel or a new
+explicit request replaces the question. Conflict prompts offer Suggest times,
+which finds up to two later non-overlapping slots in the next seven days,
+preserving duration. Choosing a slot rechecks overlaps. All-day conflicts retain
+manual date changes. Interpretation failures retain a draft for `retry` without
+retrying an ambiguous calendar write. Read-only /now and /calendars preserve
+drafts; other slash commands keep their existing replacement semantics.
+The saved-event **Change date/time** prompt follows the same replacement and
+read-only interruption rules. A new named edit/delete/reminder request uses its
+own event match; switching to an unqualified reminder retains the saved target.
+Schedule lookups preserve the prompt without renewing its expiry. Expired
+prompts cannot refresh event context or change an event through a stale reference.
+
+
+### Conversational review regressions
+
+- While a clarification about Dinner is pending, a new named request such as
+  `move Dental to Friday at 4pm`, `set a reminder 30 minutes before Dental`, or
+  `delete Dental` replaces that question and uses normal matching/confirmation.
+  Short date/time/lead-time answers still target the retained event. Switching
+  action types also leaves the old question rather than interpreting a new
+  edit or deletion as a reminder lead time.
+  Explicit reminder targets include possessive and suffix forms such as
+  `change Dental's reminder to 30 minutes before`, `update its reminder to
+  30 minutes before`, `remove Dental reminder`, and `delete the reminder about
+  Dental`. These update or remove reminders without editing/deleting the event;
+  removal also searches independent reminders. A reminder word inside a quoted
+  title or a longer title such as `Dental Reminder Workshop` remains event data.
+- Confirmed media suggestions retain their source details through conflict
+  Change time and suggested-slot rechecks. Source `add anyway` control phrases
+  cannot bypass an overlap warning, including after a time change.
+- `change it to last 3 hours` and duration changes after selecting an ambiguous
+  event preserve the requested duration. Clock/duration preservation applies
+  only when the request does not explicitly supply a new time or duration.
+
+- Context references are matched as event target phrases, not words embedded
+  in explicit titles. `move Bring It On to Friday at 4pm`, `delete It Takes Two`,
+  and reminders for `That Show` use ordinary named matching whether context is
+  absent, recently saved, or awaiting clarification. Ordinal references also
+  apply only to the target, not an ordinal appearing in a title or new details.
+- Explicit word clocks (`noon`, `midnight`, `midday`) keep their parsed times
+  through contextual edits, event selection, and media corrections. Date-only edits continue to
+  preserve the event's existing clocks and duration.
+
+- An expired edit/reminder clarification cannot refresh its target's recent
+  context, including when the next message switches action types. Short replies
+  receive expiry guidance; fresh named requests and read-only commands still
+  route normally without restoring the expired target.
+- For retained edit requests, local date and time validation/overrides use the
+  latest answer supplying each detail, just like creation drafts. A correction
+  to noon, a single clock, a new range, or a duration replaces an earlier range;
+  date corrections replace the earlier date without dropping unrelated details.
+
+- Fresh named management requests replace ready, incomplete, or expired media
+  suggestions and use ordinary matching/confirmation. For example, Dinner's
+  media draft followed by `move Dental to Friday at 4pm` edits Dental. A bare
+  lead-time correction still updates the proposed event and requires Add event.
+- Suggest-times callbacks reserve a fresh generation token before acknowledging
+  the callback or querying availability. Results are published only while that
+  same pending conflict, token, and expiry remain current. Cancellation, new
+  requests, a newer lookup, and expiry invalidate earlier work; stale lookups
+  cannot restore state, overwrite a newer prompt, or publish actionable buttons.
+
+- Photo/voice interpretation returns only its own request's preview marker;
+  the event-suggestion stage verifies that marker still owns the chat before
+  using it. A superseded interpretation returns no result and cannot adopt a
+  newer message's extraction or combine it with an older caption, including
+  when replacement happens during preview delivery or event extraction.
+
+
+### Correction semantics and additional lifecycle checks
+
+Later answers replace earlier recurrence/reminder instructions. Deterministic
+weekly overrides use only the latest scheduling instruction; multi-weekday and
+bounded recurrence rules retain validated parser output. One-off corrections
+clear a new draft's recurrence. Reminder corrections replace prior reminders;
+`also`/`another`/`additional` explicitly append, matching removals remove only
+that lead time, and `no reminders` clears all Telegram reminder metadata.
+Equivalent duplicate reminders are suppressed. Corrected invalid reminder
+lead times must be recoverable without replaying invalid history.
+Reminder messages are preserved as text and cannot change the event's date or
+clock. Local scheduling overrides ignore reminder clauses. All-day/timed
+corrections use the latest time instruction and reject missing timezone offsets.
+Location corrections preserve scheduling clauses in the same answer: `at Cafe
+on Sunday at 4pm` changes both location and schedule. Quoted venue names and bare
+location names such as `Clinic Monday` remain data. The same rule applies to
+explicit location/title/calendar corrections followed by scheduling clauses.
+Reminder lead-time matching consumes complete number expressions, including
+space/hyphen compounds. Unsupported expressions use validated parser output;
+ambiguous combinations request explicit minute values rather than saving a
+partial number or silently dropping an alert.
+
+Private-chat async continuations are scoped to the current valid input, per chat.
+A new input or cancellation invalidates older parsing, matching, availability,
+and permission-read work before a write starts. A write already submitted may
+finish and report its result, but cannot replace newer context or shortcuts.
+Stale/expired callbacks only acknowledge expiry and do not invalidate a newer
+request. Interrupted drafts are restored only while current and unexpired.
+Management intents use command positions rather than words embedded in event
+titles; explicit additions remain additions except established calendar/reminder
+commands. Fresh named management requests also replace incomplete text drafts.
