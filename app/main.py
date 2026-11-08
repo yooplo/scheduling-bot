@@ -913,9 +913,10 @@ async def handle_message(chat_id, text, settings, telegram, calendar, parser, cr
         media_requests.pop(chat_id, None)
     # Existing pending selections/confirmations retain priority over contextual references.
     pending = pending_actions.get(chat_id)
-    if pending and pending.action in {"followup_edit", "followup_remind"}:
+    if pending and pending.action in {"followup_edit", "followup_remind", "created_edit"}:
+        followup_action = "followup_edit" if pending.action == "created_edit" else pending.action
         replacement = ((text.startswith("/") and not _read_only_request(text)) or _is_explicit_add_request(lower)
-                       or _is_standalone_reminder_request(lower) or _replaces_pending_followup(text, pending.action))
+                       or _is_standalone_reminder_request(lower) or _replaces_pending_followup(text, followup_action))
         if lower in {"cancel", "/cancel"}:
             pending_actions.pop(chat_id, None)
             await telegram.send_message(chat_id, "Follow-up cancelled. The saved event is unchanged.")
@@ -946,8 +947,9 @@ async def handle_message(chat_id, text, settings, telegram, calendar, parser, cr
             return
         else:
             pending_actions.pop(chat_id, None)
-            combined = pending.request_text + "\nUser follow-up: " + text
-            if pending.action == "followup_edit":
+            combined = (f"move {pending.request_text or 'this event'} to {text}" if pending.action == "created_edit"
+                        else pending.request_text + "\nUser follow-up: " + text)
+            if followup_action == "followup_edit":
                 await _edit_event(chat_id, combined, pending.events[0], settings, telegram, calendar, parser, preserve_clock=True)
             else:
                 await _set_reminder(chat_id, combined, pending.events[0], settings, telegram, calendar, parser)
@@ -1021,18 +1023,11 @@ async def _handle_message(chat_id: int, text: str, settings: Settings, telegram:
         await _show_reminder_status(chat_id, telegram, calendar, cron)
         return
     saved = pending_actions.get(chat_id)
-    if saved and saved.action in {"created", "created_edit", "created_calendar", "created_moving"}:
+    if saved and saved.action in {"created", "created_calendar", "created_moving"}:
         pending_actions.pop(chat_id, None)
         if lowered == "cancel" or command == "cancel":
             message = "The calendar change was already submitted. Please check its result." if saved.action == "created_moving" else "Event shortcuts cancelled. The saved event is unchanged."
             await telegram.send_message(chat_id, message)
-            return
-        if saved.action == "created_edit" and not text.lstrip().startswith("/") and not _is_explicit_add_request(lowered) and not _is_standalone_reminder_request(lowered):
-            if saved.expires_at <= time.monotonic():
-                await telegram.send_message(chat_id, "That date/time-change prompt expired. Please send a new edit request.")
-                return
-            await _edit_event(chat_id, f"move {saved.request_text or 'this event'} to {text}", saved.events[0], settings, telegram, calendar, parser,
-                              preserve_clock=True)
             return
     elif saved and saved.action == "undo_delete" and lowered != "undo":
         pending_actions.pop(chat_id, None)

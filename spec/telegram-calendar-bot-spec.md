@@ -722,6 +722,11 @@ preserving duration. Choosing a slot rechecks overlaps. All-day conflicts retain
 manual date changes. Interpretation failures retain a draft for `retry` without
 retrying an ambiguous calendar write. Read-only /now and /calendars preserve
 drafts; other slash commands keep their existing replacement semantics.
+The saved-event **Change date/time** prompt follows the same replacement and
+read-only interruption rules. A new named edit/delete/reminder request uses its
+own event match; switching to an unqualified reminder retains the saved target.
+Schedule lookups preserve the prompt without renewing its expiry. Expired
+prompts cannot refresh event context or change an event through a stale reference.
 
 
 ### Conversational review regressions
